@@ -21,15 +21,15 @@ class OJKConfig:
     # Base URL
     BASE_URL = "https://ojk.go.id/id/kanal/perbankan/data-dan-statistik/laporan-keuangan-perbankan/Default.aspx"
     
-    # Timeouts (in seconds)
-    PAGE_LOAD_TIMEOUT = 30
-    ELEMENT_WAIT_TIMEOUT = 30
-    POSTBACK_WAIT_TIMEOUT = 30
+    # Timeouts (in seconds) - reduced by 50%
+    PAGE_LOAD_TIMEOUT = 15  # Reduced from 30
+    ELEMENT_WAIT_TIMEOUT = 15  # Reduced from 30
+    POSTBACK_WAIT_TIMEOUT = 15  # Reduced from 30
     
-    # Delays (in seconds) - to avoid rate limiting
-    DELAY_BETWEEN_REQUESTS = 2.0
-    DELAY_AFTER_POSTBACK = 3.0
-    RANDOM_DELAY_RANGE = (0, 1)  # Additional random delay
+    # Delays (in seconds) - to avoid rate limiting (reduced by 50%)
+    DELAY_BETWEEN_REQUESTS = 1.0  # Reduced from 2.0
+    DELAY_AFTER_POSTBACK = 1.5  # Reduced from 3.0
+    RANDOM_DELAY_RANGE = (0, 0.5)  # Reduced from (0, 1)
     
     # Selenium settings
     HEADLESS_MODE = False  # Set to True for headless mode
@@ -47,11 +47,21 @@ class OJKConfig:
         # Tab selector: Target the clickable button element (x-tab-button) that contains the text
         # Alternative simpler selector: //span[contains(@class, 'x-tab-inner') and contains(text(), 'BPR Konvensional')]
         'tab_bpr_konvensional': "//span[contains(@class, 'x-tab-inner') and contains(text(), 'BPR Konvensional')]/ancestor::span[contains(@class, 'x-tab-button')]",
-        'dropdown_month': "//select[contains(@id, 'ddlBulan')]",
-        'dropdown_year': "//select[contains(@id, 'ddlTahun')]",
-        'dropdown_province': "//select[contains(@id, 'ddlProvinsi')]",
-        'dropdown_city': "//select[contains(@id, 'ddlKota')]",
-        'dropdown_bank': "//select[contains(@id, 'ddlBank')]",
+        # ExtJS combobox selectors (not standard select elements)
+        'dropdown_month': "//input[@name='Month' or contains(@id, 'Month') or @id='Month-inputEl']",
+        'dropdown_month_trigger': "//input[@name='Month' or contains(@id, 'Month')]/following-sibling::td[contains(@class, 'x-trigger-cell')]//div[contains(@class, 'x-form-trigger')]",
+        'dropdown_year': "//input[@name='Year' or contains(@id, 'Year') or @id='Year-inputEl']",
+        'dropdown_year_trigger': "//input[@name='Year' or contains(@id, 'Year')]/following-sibling::td[contains(@class, 'x-trigger-cell')]//div[contains(@class, 'x-form-trigger')]",
+        'dropdown_province': "//input[@name='Province' or contains(@id, 'Province') or contains(@id, 'Provinsi')]",
+        'dropdown_province_trigger': "//input[@name='Province' or contains(@id, 'Province') or contains(@id, 'Provinsi')]/following-sibling::td[contains(@class, 'x-trigger-cell')]//div[contains(@class, 'x-form-trigger')]",
+        'dropdown_city': "//input[@name='City' or contains(@id, 'City') or contains(@id, 'Kota')]",
+        'dropdown_city_trigger': "//input[@name='City' or contains(@id, 'City') or contains(@id, 'Kota')]/following-sibling::td[contains(@class, 'x-trigger-cell')]//div[contains(@class, 'x-form-trigger')]",
+        'dropdown_bank': "//input[@name='Bank' or contains(@id, 'Bank')]",
+        'dropdown_bank_trigger': "//input[@name='Bank' or contains(@id, 'Bank')]/following-sibling::td[contains(@class, 'x-trigger-cell')]//div[contains(@class, 'x-form-trigger')]",
+        # ExtJS dropdown menu items (appears after clicking trigger)
+        'dropdown_menu': "//div[contains(@class, 'x-boundlist')]",
+        'dropdown_menu_list': "//ul[contains(@class, 'x-list-plain')]",
+        'dropdown_menu_item': "//li[@role='option' or contains(@class, 'x-boundlist-item')]",
         'checkbox_posisi_keuangan': "//input[contains(@id, 'chkLaporanPosisiKeuangan')]",
         'checkbox_laba_rugi': "//input[contains(@id, 'chkLaporanLabaRugi')]",
         'checkbox_kualitas_aset': "//input[contains(@id, 'chkLaporanKualitasAset')]",
