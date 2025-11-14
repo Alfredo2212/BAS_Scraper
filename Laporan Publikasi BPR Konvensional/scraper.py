@@ -12,8 +12,20 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 
-from .helper import ExtJSHelper
-from .selenium_setup import SeleniumSetup
+# Handle imports for both package and direct execution
+try:
+    from .helper import ExtJSHelper
+    from .selenium_setup import SeleniumSetup
+except ImportError:
+    # If relative imports fail, try absolute imports
+    import sys
+    from pathlib import Path
+    module_dir = Path(__file__).parent
+    if str(module_dir) not in sys.path:
+        sys.path.insert(0, str(module_dir))
+    from helper import ExtJSHelper
+    from selenium_setup import SeleniumSetup
+
 from config.settings import OJKConfig, Settings
 
 
@@ -636,7 +648,7 @@ class OJKExtJSScraper:
         
         # Step 3: Find treeview elements and check checkboxes
         print("\n  [Step 4.3] Finding treeview elements and checking checkboxes...")
-        time.sleep(0.2)  # Reduced by 80%
+        time.sleep(0.3)  # Wait a bit longer for treeview to be ready
         
         treeview_ids = [
             "treeview-1012-record-BPK-901-000001",
@@ -647,44 +659,105 @@ class OJKExtJSScraper:
         for treeview_id in treeview_ids:
             try:
                 print(f"    [INFO] Looking for treeview element: {treeview_id}")
-                treeview_element = self.driver.find_element(By.ID, treeview_id)
+                
+                # Wait for treeview element to be present
+                wait = WebDriverWait(self.driver, 10)
+                treeview_element = wait.until(
+                    EC.presence_of_element_located((By.ID, treeview_id))
+                )
                 print(f"    [OK] Found treeview element: {treeview_id}")
+                
+                # Debug: Print all nested elements to understand structure
+                all_divs = treeview_element.find_elements(By.XPATH, ".//div")
+                print(f"    [DEBUG] Found {len(all_divs)} div elements inside {treeview_id}")
                 
                 # Find nested divs with role="checkbox" inside this treeview element
                 # Try multiple XPath patterns to find checkboxes
+                checkboxes = []
+                
+                # Pattern 1: div with role="checkbox"
                 checkboxes = treeview_element.find_elements(By.XPATH, ".//div[@role='checkbox']")
-                if not checkboxes:
-                    # Try alternative: look for input type="checkbox" or elements with checkbox class
+                if checkboxes:
+                    print(f"    [DEBUG] Found {len(checkboxes)} checkbox(es) using pattern: div[@role='checkbox']")
+                else:
+                    # Pattern 2: input type="checkbox"
                     checkboxes = treeview_element.find_elements(By.XPATH, ".//input[@type='checkbox']")
-                if not checkboxes:
-                    # Try alternative: look for elements with checkbox-related classes
-                    checkboxes = treeview_element.find_elements(By.XPATH, ".//div[contains(@class, 'checkbox')]")
-                if not checkboxes:
-                    # Try alternative: look for any element with aria-checked attribute
-                    checkboxes = treeview_element.find_elements(By.XPATH, ".//*[@aria-checked]")
+                    if checkboxes:
+                        print(f"    [DEBUG] Found {len(checkboxes)} checkbox(es) using pattern: input[@type='checkbox']")
+                    else:
+                        # Pattern 3: elements with checkbox in class
+                        checkboxes = treeview_element.find_elements(By.XPATH, ".//div[contains(@class, 'checkbox')]")
+                        if checkboxes:
+                            print(f"    [DEBUG] Found {len(checkboxes)} checkbox(es) using pattern: div[contains(@class, 'checkbox')]")
+                        else:
+                            # Pattern 4: any element with aria-checked attribute
+                            checkboxes = treeview_element.find_elements(By.XPATH, ".//*[@aria-checked]")
+                            if checkboxes:
+                                print(f"    [DEBUG] Found {len(checkboxes)} checkbox(es) using pattern: *[@aria-checked]")
+                            else:
+                                # Pattern 5: look for elements with checkbox-related attributes
+                                checkboxes = treeview_element.find_elements(By.XPATH, ".//*[contains(@class, 'x-tree-checkbox') or contains(@class, 'tree-checkbox')]")
+                                if checkboxes:
+                                    print(f"    [DEBUG] Found {len(checkboxes)} checkbox(es) using pattern: *[contains(@class, 'tree-checkbox')]")
+                                else:
+                                    # Pattern 6: look for any clickable element that might be a checkbox
+                                    checkboxes = treeview_element.find_elements(By.XPATH, ".//*[@role='checkbox' or @type='checkbox' or contains(@class, 'checkbox')]")
+                                    if checkboxes:
+                                        print(f"    [DEBUG] Found {len(checkboxes)} checkbox(es) using pattern: *[@role='checkbox' or @type='checkbox' or contains(@class, 'checkbox')]")
                 
                 if checkboxes:
                     print(f"    [OK] Found {len(checkboxes)} checkbox(es) in {treeview_id}")
-                    for checkbox in checkboxes:
+                    for i, checkbox in enumerate(checkboxes):
                         try:
-                            # Check if checkbox is already checked
-                            is_checked = checkbox.get_attribute("aria-checked")
-                            if is_checked == "true":
-                                print(f"    [INFO] Checkbox already checked in {treeview_id}")
+                            # Check if element is visible
+                            if not checkbox.is_displayed():
+                                print(f"    [DEBUG] Checkbox {i+1} is not visible, skipping")
                                 continue
                             
-                            # Click the checkbox
-                            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", checkbox)
-                            time.sleep(0.05)  # Reduced by 80%
-                            self.driver.execute_script("arguments[0].click();", checkbox)
-                            print(f"    [OK] Checked checkbox in {treeview_id}")
+                            # Get checkbox attributes for debugging
+                            role = checkbox.get_attribute("role")
+                            aria_checked = checkbox.get_attribute("aria-checked")
+                            checkbox_type = checkbox.get_attribute("type")
+                            checkbox_class = checkbox.get_attribute("class")
+                            
+                            print(f"    [DEBUG] Checkbox {i+1} - role: {role}, aria-checked: {aria_checked}, type: {checkbox_type}, class: {checkbox_class}")
+                            
+                            # Check if checkbox is already checked
+                            if aria_checked == "true" or (checkbox_type == "checkbox" and checkbox.is_selected()):
+                                print(f"    [INFO] Checkbox {i+1} already checked in {treeview_id}")
+                                continue
+                            
+                            # Scroll to checkbox and click
+                            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center', behavior: 'smooth'});", checkbox)
+                            time.sleep(0.1)  # Wait for scroll
+                            
+                            # Try clicking with JavaScript first
+                            try:
+                                self.driver.execute_script("arguments[0].click();", checkbox)
+                                print(f"    [OK] Checked checkbox {i+1} in {treeview_id} (JavaScript click)")
+                            except:
+                                # Fallback to regular click
+                                checkbox.click()
+                                print(f"    [OK] Checked checkbox {i+1} in {treeview_id} (regular click)")
+                            
                             time.sleep(0.1)  # Reduced by 80%
                         except Exception as e:
-                            print(f"    [WARNING] Could not check checkbox in {treeview_id}: {e}")
+                            print(f"    [WARNING] Could not check checkbox {i+1} in {treeview_id}: {e}")
+                            import traceback
+                            traceback.print_exc()
                 else:
+                    # Debug: Print HTML structure to help understand what's inside
                     print(f"    [WARNING] No checkboxes found in {treeview_id}")
+                    try:
+                        inner_html = treeview_element.get_attribute("innerHTML")
+                        if inner_html:
+                            print(f"    [DEBUG] Inner HTML preview (first 500 chars): {inner_html[:500]}")
+                    except:
+                        pass
             except Exception as e:
                 print(f"    [WARNING] Could not find treeview element {treeview_id}: {e}")
+                import traceback
+                traceback.print_exc()
         
         print("  [OK] Completed 3-step dropdown and checkbox selection")
     
