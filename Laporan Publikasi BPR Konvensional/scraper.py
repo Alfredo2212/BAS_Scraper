@@ -760,6 +760,45 @@ class OJKExtJSScraper:
                 traceback.print_exc()
         
         print("  [OK] Completed 3-step dropdown and checkbox selection")
+        
+        # Step 4: Click "Tampilkan" button after checkboxes are checked
+        print("\n  [Step 4.4] Clicking 'Tampilkan' button...")
+        time.sleep(0.2)  # Reduced by 80%
+        
+        try:
+            # Find the Tampilkan button by ID
+            tampilkan_button = self.driver.find_element(By.ID, "ShowReportButton-btnInnerEl")
+            print("  [OK] Found 'Tampilkan' button")
+            
+            # Scroll to button and click
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center', behavior: 'smooth'});", tampilkan_button)
+            time.sleep(0.1)  # Wait for scroll
+            
+            # Try clicking with JavaScript first
+            try:
+                self.driver.execute_script("arguments[0].click();", tampilkan_button)
+                print("  [OK] Clicked 'Tampilkan' button (JavaScript click)")
+            except:
+                # Fallback to regular click
+                tampilkan_button.click()
+                print("  [OK] Clicked 'Tampilkan' button (regular click)")
+            
+            time.sleep(0.3)  # Wait for form submission/PostBack
+        except Exception as e:
+            print(f"  [WARNING] Could not click 'Tampilkan' button: {e}")
+            # Try alternative: find by text content
+            try:
+                tampilkan_button = self.driver.find_element(By.XPATH, "//span[contains(text(), 'Tampilkan')]")
+                print("  [OK] Found 'Tampilkan' button by text")
+                self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", tampilkan_button)
+                time.sleep(0.1)
+                self.driver.execute_script("arguments[0].click();", tampilkan_button)
+                print("  [OK] Clicked 'Tampilkan' button (alternative method)")
+                time.sleep(0.3)
+            except Exception as e2:
+                print(f"  [ERROR] Could not click 'Tampilkan' button with alternative method: {e2}")
+                import traceback
+                traceback.print_exc()
     
     def _find_combo_name_by_keyword(self, keyword: str) -> str:
         """
