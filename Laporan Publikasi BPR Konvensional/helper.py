@@ -268,7 +268,9 @@ class ExtJSHelper:
         
         if result and result.get('success'):
             print("[OK] Clicked 'Tampilkan' button using ExtJS API")
-            time.sleep(0.2)  # Reduced from 1.0s to 0.2s (80% faster) - Wait for form submission
+            # Note: Main wait time (7.5 seconds) is handled in calling code after this method
+            # This is just a minimal wait for the click to register
+            time.sleep(0.5)  # Minimal wait for click to register
             return True
         else:
             error = result.get('error', 'Unknown error') if result else 'No result returned'
