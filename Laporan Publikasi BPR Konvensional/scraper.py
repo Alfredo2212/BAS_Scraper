@@ -57,6 +57,9 @@ class OJKExtJSScraper:
         self.headless = headless if headless is not None else OJKConfig.HEADLESS_MODE
         self.output_dir = Path(Settings.OUTPUT_DIR)
         self.output_dir.mkdir(exist_ok=True)
+        self.excel_wb = None  # Workbook for appending data
+        self.excel_ws = None  # Worksheet for appending data
+        self.excel_row = 1  # Current row in Excel
     
     def initialize(self):
         """Initialize WebDriver and ExtJS helper"""
@@ -404,111 +407,118 @@ class OJKExtJSScraper:
             except Exception as e:
                 print(f"[WARNING] Could not click province <li> element: {e}")
         
-        # Step 4: Select dropdowns and check checkboxes (3-step process)
-        print("\n[Step 4] Starting 3-step dropdown and checkbox selection...")
-        self._select_dropdowns_and_checkboxes(year)
+        # Step 4: Select initial dropdowns and checkboxes (only once at start)
+        print("\n[Step 4] Starting initial dropdown and checkbox selection...")
+        self._select_initial_dropdowns_and_checkboxes()
         
-        # Get all provinces using ExtJS API (for later use in loop)
-        # Note: This section is skipped if browser was already closed in _save_to_excel
-        if self.extjs is None:
-            print("\n[INFO] ExtJS helper not available (browser may have been closed). Skipping province loop.")
-            return
+        # Wait a bit after checkbox is ticked to ensure dropdowns are ready
+        print("\n[INFO] Waiting for dropdowns to be ready after checkbox selection...")
+        time.sleep(2.0)
         
-        print("\n[Step 3b] Getting all provinces via ExtJS...")
-        province_combo_name = self._find_combo_name_by_keyword("province")
-        if not province_combo_name:
-            province_combo_name = self.extjs.find_combo_by_position(2)
+        # Initialize Excel file
+        self._initialize_excel(year)
         
-        provinces = self.extjs.get_extjs_combo_values(province_combo_name) if province_combo_name else []
-        print(f"[INFO] Found {len(provinces)} provinces: {provinces[:5]}...")
+        # Step 5: Sequential iteration through cities and banks
+        # This starts AFTER checkbox is ticked - we iterate through all city/bank combinations
+        print("\n[Step 5] Starting sequential iteration through all cities and banks...")
+        print("[INFO] Iteration starts after checkbox is ticked - will select city, then bank, then click Tampilkan for each combination")
+        city_index = 0  # Start with first city (index 0)
+        is_first_bank_in_city = True
+        done = False
         
-        # Step 4: Loop through provinces
-        for province in provinces:
-            if not province or province.strip() == '':
-                continue
+        # Get the first city (starts iteration after checkbox)
+        print(f"\n[INFO] Getting first city (index {city_index})...")
+        current_city = self._get_city_by_index(city_index)
+        if not current_city:
+            print(f"  [WARNING] No cities found at index {city_index}. This might be a timing issue or no cities available.")
+            print(f"  [INFO] Scraping completed!")
+            done = True
+        
+        while not done:
+            if not current_city:
+                print(f"  [INFO] No more cities. Scraping completed!")
+                done = True
+                break
             
+            # Get all banks for this city (only once per city)
+            # Wait a bit after city selection to ensure dropdown is ready
+            time.sleep(2.0)  # Wait for city selection to fully load
             print(f"\n{'='*60}")
-            print(f"[PROVINCE] Processing: {province}")
+            print(f"[CITY] Processing: {current_city}")
             print(f"{'='*60}")
+            bank_names = self._get_all_bank_names(city_index, city_already_selected=True)
+            print(f"  [INFO] Found {len(bank_names)} banks in {current_city}")
             
-            # Select province
-            self.extjs.set_extjs_combo(province_combo_name, province)
-            time.sleep(2.0)  # Wait 2 seconds for PostBack to load cities (sequential dependency)
+            # If no banks found, wait a bit and retry once
+            if not bank_names:
+                print(f"  [WARNING] No banks found on first attempt, waiting and retrying...")
+                time.sleep(3.0)
+                bank_names = self._get_all_bank_names(city_index, city_already_selected=True)
+                print(f"  [INFO] Found {len(bank_names)} banks in {current_city} (retry)")
             
-            # Get all cities for this province
-            city_combo_name = self._find_combo_name_by_keyword("city")
-            if not city_combo_name:
-                city_combo_name = self.extjs.find_combo_by_position(3)
-            
-            cities = self.extjs.get_extjs_combo_values(city_combo_name) if city_combo_name else []
-            print(f"[INFO] Found {len(cities)} cities in {province}")
-            
-            # Step 5: Loop through cities
-            for city in cities:
-                if not city or city.strip() == '':
+            if not bank_names:
+                print(f"  [WARNING] No banks found in {current_city}, moving to next city...")
+                city_index += 1
+                current_city = self._get_city_by_index(city_index)
+                is_first_bank_in_city = True
+                continue
+                
+            # Iterate through all banks in this city
+            for bank_index, current_bank in enumerate(bank_names):
+                print(f"\n  [BANK ({bank_index+1}/{len(bank_names)})] Processing: {current_bank}")
+                
+                # Select the bank by index (bank_index = 0 selects first span, bank_index = 1 selects second, etc.)
+                # Add retry logic for index 0, especially after city change
+                max_retries = 3 if bank_index == 0 else 1
+                selected_bank_name = None
+                
+                for retry in range(max_retries):
+                    selected_bank_name = self._select_bank_by_index(bank_index, city_index, city_already_selected=True)
+                    if selected_bank_name:
+                        break
+                    elif retry < max_retries - 1:
+                        print(f"  [WARNING] Could not select bank at index {bank_index}, retrying ({retry+1}/{max_retries})...")
+                        time.sleep(2.0)  # Wait longer before retry
+                
+                if not selected_bank_name:
+                    print(f"  [WARNING] Could not select bank at index {bank_index} after {max_retries} attempts")
                     continue
                 
-                print(f"\n  [CITY] Processing: {city}")
+                time.sleep(2.0)  # Wait longer for bank selection to load (slower speed)
                 
-                # Select city
-                self.extjs.set_extjs_combo(city_combo_name, city)
-                time.sleep(2.5)  # Wait 2.5 seconds for PostBack to load banks (sequential dependency)    
+                # Click Tampilkan and extract data - MUST complete before moving to next bank
+                print(f"  [INFO] Clicking Tampilkan and waiting for data extraction to complete...")
+                extracted_data = self._click_tampilkan_and_extract_data(year, current_city, selected_bank_name)
                 
-                # Get all banks for this city
-                bank_combo_name = self._find_combo_name_by_keyword("bank")
-                if not bank_combo_name:
-                    bank_combo_name = self.extjs.find_combo_by_position(4)
+                if extracted_data:
+                    # Append to Excel - this must complete before moving to next bank
+                    print(f"  [INFO] Appending data to Excel...")
+                    self._append_to_excel(extracted_data, year, current_city, selected_bank_name, is_first_bank_in_city)
+                    print(f"  [OK] Data successfully extracted and saved to Excel for {current_city} - {selected_bank_name}")
+                    is_first_bank_in_city = False
+                    # Wait longer to ensure Excel data is fully written
+                    time.sleep(1.0)
+                else:
+                    print(f"  [WARNING] Failed to extract data for {current_city} - {selected_bank_name}")
                 
-                banks = self.extjs.get_extjs_combo_values(bank_combo_name) if bank_combo_name else []
-                print(f"    [INFO] Found {len(banks)} banks in {city}")
-                
-                # Step 6: Loop through banks
-                for bank in banks:
-                    if not bank or bank.strip() == '':
-                        continue
-                    
-                    print(f"\n    [BANK] Processing: {bank}")
-                    
-                    try:
-                        # Select bank
-                        self.extjs.set_extjs_combo(bank_combo_name, bank)
-                        time.sleep(0.5)
-                        
-                        # Click "Tampilkan" button
-                        if not self.extjs.click_tampilkan():
-                            print(f"      [WARNING] Failed to click Tampilkan for {bank}")
-                            continue
-                        
-                        # Wait for grid to load (10 seconds as required for Tampilkan to load)
-                        print(f"      [INFO] Waiting up to 7.5 seconds for grid to load after Tampilkan...")
-                        if not self.extjs.wait_for_grid(timeout=7.5):  # Increased to 7.5s to ensure proper loading
-                            print(f"      [WARNING] Grid not loaded for {bank}")
-                            continue
-                        
-                        # Extract grid data
-                        grid_data = self.extjs.get_grid_data()
-                        
-                        if grid_data:
-                            # Save to CSV
-                            filename = f"ojk_{province}_{city}_{bank}_{month}_{year}.csv"
-                            filename = filename.replace('/', '_').replace('\\', '_')  # Sanitize filename
-                            filepath = self.output_dir / filename
-                            
-                            if grid_data:
-                                self._save_to_csv(filepath, grid_data)
-                                print(f"      [OK] Saved {len(grid_data)} rows to {filepath}")
-                            else:
-                                print(f"      [WARNING] No data found for {bank}")
-                        else:
-                            print(f"      [WARNING] Could not extract grid data for {bank}")
-                        
-                        time.sleep(0.5)  # Delay between requests
-                        
-                    except Exception as e:
-                        print(f"      [ERROR] Error processing {bank}: {e}")
-                        continue
+                # Check if this is the last bank - if so, wait a bit before moving to next city
+                if bank_index == len(bank_names) - 1:
+                    print(f"  [INFO] This is the last bank ({bank_index+1}/{len(bank_names)}) in {current_city}")
+                    time.sleep(1.0)  # Additional wait after last bank
+            
+            # After processing ALL banks in this city, move to next city
+            print(f"  [INFO] Finished processing all {len(bank_names)} banks in {current_city}, moving to next city...")
+            time.sleep(1.0)  # Wait before changing city
+            city_index += 1
+            current_city = self._get_city_by_index(city_index)
+            is_first_bank_in_city = True
         
-        print("\n[OK] Scraping completed!")
+        # Finalize Excel file
+        self._finalize_excel(year)
+        
+        print("\n[OK] All data collection completed!")
+        print("[INFO] Closing browser...")
+        self.cleanup()
     
     def _tick_checkboxes(self):
         """
@@ -609,7 +619,7 @@ class OJKExtJSScraper:
         
         print("  [OK] Completed checkbox selection")
     
-    def _select_dropdowns_and_checkboxes(self, year: str):
+    def _select_initial_dropdowns_and_checkboxes(self):
         """
         3-step sequential process:
         1. Click dropdown arrow ext-gen1064 and select topmost <li>
@@ -623,145 +633,13 @@ class OJKExtJSScraper:
         from selenium.webdriver.support.ui import WebDriverWait
         from selenium.webdriver.support import expected_conditions as EC
         
-        # Step 1: Click dropdown arrow ext-gen1064 and select topmost <li>
-        print("\n  [Step 4.1] Clicking dropdown arrow ext-gen1064...")
-        time.sleep(0.5)
+        # Step 1: Skip dropdown selections (handled in main loop)
+        print("\n  [Step 4.1] Skipping city dropdown selection (handled in main loop)...")
+        time.sleep(0.2)
         
-        try:
-            dropdown1_trigger = self.driver.find_element(By.ID, "ext-gen1064")
-            print("  [OK] Found dropdown arrow ext-gen1064")
-            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", dropdown1_trigger)
-            time.sleep(0.5)
-            self.driver.execute_script("arguments[0].click();", dropdown1_trigger)
-            print("  [OK] Clicked dropdown arrow ext-gen1064")
-            
-            # Wait for dropdown and select topmost <li>
-            time.sleep(0.5)
-            wait = WebDriverWait(self.driver, 5)
-            dropdown_list = wait.until(
-                EC.presence_of_element_located((By.XPATH, "//ul[contains(@class, 'x-list-plain')]"))
-            )
-            
-            li_elements = self.driver.find_elements(By.XPATH, "//li[@role='option' or contains(@class, 'x-boundlist-item')]")
-            if not li_elements:
-                li_elements = self.driver.find_elements(By.XPATH, "//ul[contains(@class, 'x-list-plain')]//li")
-            
-            # Filter out empty <li> elements and get the first non-empty one
-            for li in li_elements:
-                try:
-                    li_text = li.text.strip()
-                    if li_text:  # Only select non-empty <li>
-                        print(f"  [OK] Selecting topmost <li>: '{li_text}'")
-                        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", li)
-                        time.sleep(0.5)
-                        self.driver.execute_script("arguments[0].click();", li)
-                        print(f"  [OK] Clicked topmost <li>: '{li_text}'")
-                        time.sleep(0.5)  # Wait for PostBack
-                        print("  [INFO] Waiting 1 second buffer after dropdown 1 selection...")
-                        time.sleep(0.5)  # Buffer between dropdown selections
-                        break
-                except:
-                    continue
-        except Exception as e:
-            print(f"  [WARNING] Could not select dropdown ext-gen1064: {e}")
-        
-        # Step 2: Click dropdown arrow ext-gen1069 and select topmost <tr>
-        print("\n  [Step 4.2] Clicking dropdown arrow ext-gen1069...")
-        time.sleep(0.5)
-        
-        try:
-            dropdown2_trigger = self.driver.find_element(By.ID, "ext-gen1069")
-            print("  [OK] Found dropdown arrow ext-gen1069")
-            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", dropdown2_trigger)
-            time.sleep(0.5)
-            self.driver.execute_script("arguments[0].click();", dropdown2_trigger)
-            print("  [OK] Clicked dropdown arrow ext-gen1069")
-            
-            # Wait for dropdown to appear and find the dropdown container
-            time.sleep(0.5)  # Wait a bit longer for dropdown to appear
-            wait = WebDriverWait(self.driver, 10)
-            
-            # Try to find the dropdown container (boundlist or table)
-            dropdown_container = None
-            try:
-                # Look for boundlist container first
-                dropdown_container = wait.until(
-                    EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'x-boundlist') or contains(@class, 'x-layer')]"))
-                )
-                print("  [OK] Found dropdown container (boundlist/layer)")
-            except:
-                # Try table container
-                try:
-                    dropdown_container = wait.until(
-                        EC.presence_of_element_located((By.XPATH, "//table[contains(@class, 'x-boundlist') or ancestor::div[contains(@class, 'x-boundlist')]]"))
-                    )
-                    print("  [OK] Found dropdown container (table)")
-                except:
-                    print("  [WARNING] Could not find specific dropdown container, searching globally")
-            
-            # Find all <tr> elements, scoped to dropdown container if found
-            if dropdown_container:
-                tr_elements = dropdown_container.find_elements(By.XPATH, ".//tr")
-            else:
-                # Search globally but prioritize visible dropdown elements
-                tr_elements = self.driver.find_elements(By.XPATH, "//div[contains(@class, 'x-boundlist')]//tr | //div[contains(@class, 'x-layer')]//tr")
-                if not tr_elements:
-                    tr_elements = self.driver.find_elements(By.XPATH, "//tr")
-            
-            if tr_elements:
-                print(f"  [DEBUG] Found {len(tr_elements)} <tr> elements")
-                # Filter out empty <tr> elements and get the first non-empty one
-                for i, tr in enumerate(tr_elements):
-                    try:
-                        # Check if element is visible
-                        if not tr.is_displayed():
-                            continue
-                            
-                        tr_text = tr.text.strip()
-                        if tr_text:  # Only select non-empty <tr>
-                            print(f"  [OK] Selecting topmost <tr> (index {i}): '{tr_text[:50]}...'")
-                            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", tr)
-                            time.sleep(0.5)  # Slightly longer wait for visibility
-                            self.driver.execute_script("arguments[0].click();", tr)
-                            print(f"  [OK] Clicked topmost <tr>: '{tr_text[:50]}...'")
-                            time.sleep(0.5)  # Wait for PostBack
-                            print("  [INFO] Waiting 1 second buffer after dropdown 2 selection...")
-                            time.sleep(0.5)  # Buffer between dropdown selections
-                            break
-                    except Exception as e:
-                        print(f"  [DEBUG] Could not click tr at index {i}: {e}")
-                        continue
-                else:
-                    print("  [WARNING] No clickable <tr> elements found")
-            else:
-                # Fallback: if no <tr> found, try <li> as before
-                print("  [INFO] No <tr> elements found, trying <li> as fallback...")
-                if dropdown_container:
-                    li_elements = dropdown_container.find_elements(By.XPATH, ".//li[@role='option' or contains(@class, 'x-boundlist-item')]")
-                else:
-                    li_elements = self.driver.find_elements(By.XPATH, "//li[@role='option' or contains(@class, 'x-boundlist-item')]")
-                if not li_elements:
-                    li_elements = self.driver.find_elements(By.XPATH, "//ul[contains(@class, 'x-list-plain')]//li")
-                
-                for li in li_elements:
-                    try:
-                        if not li.is_displayed():
-                            continue
-                        li_text = li.text.strip()
-                        if li_text:  # Only select non-empty <li>
-                            print(f"  [OK] Selecting topmost <li> (fallback): '{li_text}'")
-                            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", li)
-                            time.sleep(0.5)
-                            self.driver.execute_script("arguments[0].click();", li)
-                            print(f"  [OK] Clicked topmost <li> (fallback): '{li_text}'")
-                            time.sleep(0.5)  # Wait for PostBack
-                            break
-                    except:
-                        continue
-        except Exception as e:
-            print(f"  [WARNING] Could not select dropdown ext-gen1069: {e}")
-            import traceback
-            traceback.print_exc()
+        # Step 2: Skip bank dropdown selection (handled in main loop)
+        print("\n  [Step 4.2] Skipping bank dropdown selection (handled in main loop)...")
+        time.sleep(0.2)
         
         # Step 3: Find treeview element and check only the first checkbox
         # All three data types (Kredit, Total Aset, DPK) use the same checkbox
@@ -852,74 +730,641 @@ class OJKExtJSScraper:
         except Exception as e:
             print(f"    [WARNING] Could not find treeview element {treeview_id}: {e}")
         
-        print("  [OK] Completed checkbox selection")
-        
-        # Step 4: Click "Tampilkan" button and wait for report to load
-        print("\n  [Step 4.4] Clicking 'Tampilkan' button and waiting for report to load...")
-        time.sleep(0.5)
-        
-        # Click Tampilkan button once and wait 1 minute
+        print("  [OK] Completed initial setup (dropdowns and checkbox)")
+    
+    def _get_city_by_index(self, index: int) -> str:
+        """Get city name by index from dropdown ext-gen1064. Returns city name or None if not found."""
         try:
-            # Find and click Tampilkan button
+            print(f"    [DEBUG] Attempting to get city at index {index}...")
+            # Click dropdown trigger to open
+            dropdown_trigger = self.driver.find_element(By.ID, "ext-gen1064")
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", dropdown_trigger)
+            time.sleep(0.5)
+            self.driver.execute_script("arguments[0].click();", dropdown_trigger)
+            print(f"    [DEBUG] Clicked city dropdown trigger")
+            
+            # Wait for dropdown to appear
+            time.sleep(0.5)
+            wait = WebDriverWait(self.driver, 10)
+            wait.until(EC.presence_of_element_located((By.XPATH, "//ul[contains(@class, 'x-list-plain')]")))
+            print(f"    [DEBUG] City dropdown appeared")
+            
+            # Get all city options
+            li_elements = self.driver.find_elements(By.XPATH, "//li[@role='option' or contains(@class, 'x-boundlist-item')]")
+            if not li_elements:
+                li_elements = self.driver.find_elements(By.XPATH, "//ul[contains(@class, 'x-list-plain')]//li")
+            
+            print(f"    [DEBUG] Found {len(li_elements)} <li> elements in city dropdown")
+            
+            # Filter out empty elements and get by index
+            valid_cities = [li for li in li_elements if li.text.strip()]
+            print(f"    [DEBUG] Found {len(valid_cities)} valid cities (non-empty)")
+            
+            if valid_cities:
+                for i, city_li in enumerate(valid_cities[:5]):  # Print first 5 for debugging
+                    print(f"    [DEBUG] City {i}: '{city_li.text.strip()[:50]}...'")
+            
+            if index < len(valid_cities):
+                city_name = valid_cities[index].text.strip()
+                print(f"    [DEBUG] Selecting city at index {index}: '{city_name}'")
+                # Select it
+                self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", valid_cities[index])
+                time.sleep(0.5)
+                self.driver.execute_script("arguments[0].click();", valid_cities[index])
+                time.sleep(2.0)  # Wait longer for PostBack and dropdown to update
+                print(f"    [OK] Selected city: '{city_name}'")
+                return city_name
+            else:
+                print(f"    [WARNING] Index {index} is out of range. Total valid cities: {len(valid_cities)}")
+                # Close dropdown
+                try:
+                    from selenium.webdriver.common.keys import Keys
+                    dropdown_trigger.send_keys(Keys.ESCAPE)
+                except:
+                    pass
+                return None
+        except Exception as e:
+            print(f"    [ERROR] Could not get city by index {index}: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    def _get_all_bank_names(self, city_index: int, city_already_selected: bool = False) -> list:
+        """Get all bank names from dropdown ext-gen1069. Returns list of bank names.
+        
+        Args:
+            city_index: Index of the city (used to ensure correct city is selected)
+            city_already_selected: If True, skip city selection (city was already selected)
+        """
+        try:
+            # Make sure we're on the correct city first (unless already selected)
+            if not city_already_selected:
+                current_city = self._get_city_by_index(city_index)
+                if not current_city:
+                    return []
+                time.sleep(3.0)  # Wait longer for banks to load after city selection
+            else:
+                time.sleep(1.0)  # Wait a bit longer even if city already selected
+            
+            # Click dropdown trigger to open
+            dropdown_trigger = self.driver.find_element(By.ID, "ext-gen1069")
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", dropdown_trigger)
+            time.sleep(0.5)  # Longer wait before clicking
+            self.driver.execute_script("arguments[0].click();", dropdown_trigger)
+            
+            # Wait for dropdown to appear
+            time.sleep(0.5)
+            wait = WebDriverWait(self.driver, 10)  # Increased wait time
+            wait.until(EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'x-boundlist')] | //table")))
+            
+            # Wait for tbody to be present and populated
+            try:
+                wait.until(EC.presence_of_element_located((By.XPATH, "//tbody[@id='treeview-1022-body']")))
+                time.sleep(1.0)  # Wait for spans to be rendered
+            except:
+                pass
+            
+            # Get all spans with class="x-tree-node-text" within tbody id="treeview-1022-body"
+            # This is the bank dropdown, not the checkbox area
+            # THE FIX: Only use visible spans for indexing - filter immediately
+            # Ensure we ONLY check spans inside treeview-1022-body tbody
+            all_spans = self.driver.find_elements(By.XPATH, "//tbody[@id='treeview-1022-body']//span[@class='x-tree-node-text' or contains(@class, 'x-tree-node-text')]")
+            
+            # Filter to only visible, non-empty spans immediately
+            # The XPath already ensures we're only getting spans from treeview-1022-body
+            span_elements = [
+                s for s in all_spans
+                if s.is_displayed() and s.text.strip()
+            ]
+            
+            bank_names = []
+            skip_labels = ["Laporan Posisi Keuangan", "Laporan Laba Rugi", "Laporan", "Posisi", "Keuangan", "Laba", "Rugi"]
+            
+            if span_elements:
+                for span in span_elements:
+                    span_text = span.text.strip()
+                    
+                    # Skip if it's a known label (not a bank name)
+                    is_label = any(label.lower() in span_text.lower() for label in skip_labels)
+                    if is_label:
+                        continue
+                    
+                    # Bank names typically contain numbers (bank codes)
+                    has_number = any(char.isdigit() for char in span_text)
+                    
+                    # Only add if it looks like a bank name (has number or is reasonably long)
+                    if has_number or len(span_text) > 15:
+                        bank_names.append(span_text)
+                        print(f"    [DEBUG] Found bank: '{span_text[:50]}...'")
+            
+            # Close dropdown
+            try:
+                from selenium.webdriver.common.keys import Keys
+                dropdown_trigger.send_keys(Keys.ESCAPE)
+            except:
+                pass
+            
+            return bank_names
+        except Exception as e:
+            print(f"    [DEBUG] Could not get all bank names: {e}")
+            return []
+    
+    def _select_bank_by_index(self, bank_index: int, city_index: int, city_already_selected: bool = False) -> str:
+        """Select a bank by its index from dropdown ext-gen1069. 
+        
+        Args:
+            bank_index: Index of the bank to select (0 = first span, 1 = second span, etc.)
+            city_index: Index of the city (used to ensure correct city is selected)
+            city_already_selected: If True, skip city selection (city was already selected)
+        
+        Returns:
+            Bank name if successful, empty string if failed.
+        """
+        try:
+            # Make sure we're on the correct city first (unless already selected)
+            if not city_already_selected:
+                current_city = self._get_city_by_index(city_index)
+                if not current_city:
+                    return ""
+                time.sleep(3.0)  # Wait longer for banks to load after city selection
+            else:
+                # If this is index 0 (first bank), wait longer to ensure dropdown is ready
+                if bank_index == 0:
+                    time.sleep(2.0)  # Longer wait for first bank after city change
+                else:
+                    time.sleep(1.0)  # Wait between bank selections
+            
+            # Click dropdown trigger to open
+            dropdown_trigger = self.driver.find_element(By.ID, "ext-gen1069")
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", dropdown_trigger)
+            time.sleep(0.3)
+            self.driver.execute_script("arguments[0].click();", dropdown_trigger)
+            
+            # Wait for dropdown to appear
+            time.sleep(0.5)
+            wait = WebDriverWait(self.driver, 10)
+            wait.until(EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'x-boundlist')] | //table")))
+            
+            # Wait for tbody to be present and populated
+            # For index 0 (first bank), wait longer to ensure dropdown is fully loaded
+            wait_time = 1.5 if bank_index == 0 else 0.5
+            try:
+                wait.until(EC.presence_of_element_located((By.XPATH, "//tbody[@id='treeview-1022-body']")))
+                time.sleep(wait_time)  # Longer wait for first bank, shorter for others
+            except:
+                pass
+            
+            # Additional wait for spans to be rendered, especially for index 0
+            if bank_index == 0:
+                time.sleep(1.0)
+            
+            # Get all spans with class="x-tree-node-text" within tbody id="treeview-1022-body"
+            # This ensures we're clicking the dropdown tr, not the checkbox tr
+            # THE FIX: Only use visible spans for indexing - filter immediately
+            # Ensure we ONLY check spans inside treeview-1022-body tbody
+            all_spans = self.driver.find_elements(By.XPATH, "//tbody[@id='treeview-1022-body']//span[@class='x-tree-node-text' or contains(@class, 'x-tree-node-text')]")
+            
+            # Filter to only visible, non-empty spans immediately
+            # The XPath already ensures we're only getting spans from treeview-1022-body
+            span_elements = [
+                s for s in all_spans
+                if s.is_displayed() and s.text.strip()
+            ]
+            
+            print(f"    [DEBUG] Found {len(span_elements)} visible, non-empty span elements in dropdown (from treeview-1022-body)")
+            
+            # Filter spans the same way as _get_all_bank_names
+            skip_labels = ["Laporan Posisi Keuangan", "Laporan Laba Rugi", "Laporan", "Posisi", "Keuangan", "Laba", "Rugi"]
+            valid_bank_spans = []
+            
+            for span in span_elements:
+                try:
+                    span_text = span.text.strip()
+                    
+                    # Skip if it's a known label (not a bank name)
+                    is_label = any(label.lower() in span_text.lower() for label in skip_labels)
+                    if is_label:
+                        continue
+                    
+                    # Bank names typically contain numbers (bank codes)
+                    has_number = any(char.isdigit() for char in span_text)
+                    
+                    # Only add if it looks like a bank name (has number or is reasonably long)
+                    if has_number or len(span_text) > 15:
+                        valid_bank_spans.append((span, span_text))
+                        print(f"    [DEBUG] Valid bank span {len(valid_bank_spans)-1}: '{span_text[:50]}...'")
+                except:
+                    # Element might be stale, skip it
+                    continue
+            
+            print(f"    [DEBUG] Total valid bank spans: {len(valid_bank_spans)}")
+            
+            # Select by index
+            if bank_index < len(valid_bank_spans):
+                selected_span, bank_name = valid_bank_spans[bank_index]
+                
+                # Find the parent tr within the tbody (this is the dropdown row, not checkbox)
+                try:
+                    # Find the closest tr ancestor (should be within treeview-1022-body)
+                    parent_tr = selected_span.find_element(By.XPATH, "./ancestor::tr[1]")
+                    clickable_elem = parent_tr
+                except:
+                    # Fallback: try to find any clickable ancestor
+                    try:
+                        clickable_elem = selected_span.find_element(By.XPATH, "./ancestor::*[@role='row' or contains(@class, 'x-boundlist-item')][1]")
+                    except:
+                        clickable_elem = selected_span
+                
+                # Select it
+                self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", clickable_elem)
+                time.sleep(0.3)
+                self.driver.execute_script("arguments[0].click();", clickable_elem)
+                time.sleep(0.5)  # Wait for PostBack
+                print(f"    [DEBUG] Selected bank at index {bank_index}: '{bank_name[:50]}...'")
+                return bank_name
+            else:
+                # Close dropdown if index out of range
+                try:
+                    from selenium.webdriver.common.keys import Keys
+                    dropdown_trigger.send_keys(Keys.ESCAPE)
+                except:
+                    pass
+                print(f"    [WARNING] Bank index {bank_index} is out of range. Total valid banks: {len(valid_bank_spans)}")
+                return ""
+        except Exception as e:
+            print(f"    [DEBUG] Could not select bank by index {bank_index}: {e}")
+            return ""
+    
+    def _get_bank_by_index(self, city_index: int, bank_index: int, city_already_selected: bool = False) -> str:
+        """Get bank name by index from dropdown ext-gen1069. Returns bank name or None if not found.
+        
+        Args:
+            city_index: Index of the city (used to ensure correct city is selected)
+            bank_index: Index of the bank to select
+            city_already_selected: If True, skip city selection (city was already selected)
+        """
+        # Get all bank names first
+        bank_names = self._get_all_bank_names(city_index, city_already_selected)
+        
+        if bank_index < len(bank_names):
+            bank_name = bank_names[bank_index]
+            # Select the bank by name
+            if self._select_bank_by_name(bank_name):
+                return bank_name
+        
+        return None
+    
+    def _get_city_and_bank_by_index(self, city_index: int, bank_index: int) -> tuple:
+        """Get both city and bank by their indices. Returns (city_name, bank_name) or (None, None)"""
+        city = self._get_city_by_index(city_index)
+        if not city:
+            return (None, None)
+        
+        # City is already selected, so pass city_already_selected=True
+        bank = self._get_bank_by_index(city_index, bank_index, city_already_selected=True)
+        if not bank:
+            return (city, None)
+        
+        return (city, bank)
+    
+    def _select_next_city(self) -> bool:
+        """Select next city from dropdown ext-gen1064. Returns True if successful, False if last city."""
+        try:
+            # Click dropdown trigger
+            dropdown_trigger = self.driver.find_element(By.ID, "ext-gen1064")
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", dropdown_trigger)
+            time.sleep(0.5)
+            self.driver.execute_script("arguments[0].click();", dropdown_trigger)
+            
+            # Wait for dropdown to appear
+            time.sleep(0.5)
+            wait = WebDriverWait(self.driver, 5)
+            wait.until(EC.presence_of_element_located((By.XPATH, "//ul[contains(@class, 'x-list-plain')]")))
+            
+            # Get current selected city
+            current_city = self._get_current_selected_city()
+            
+            # Get all city options
+            li_elements = self.driver.find_elements(By.XPATH, "//li[@role='option' or contains(@class, 'x-boundlist-item')]")
+            if not li_elements:
+                li_elements = self.driver.find_elements(By.XPATH, "//ul[contains(@class, 'x-list-plain')]//li")
+            
+            # Find current city index and select next
+            current_index = -1
+            for i, li in enumerate(li_elements):
+                li_text = li.text.strip()
+                if li_text and (current_city.lower() in li_text.lower() or li_text.lower() in current_city.lower()):
+                    current_index = i
+                    break
+            
+            # Select next city
+            if current_index >= 0 and current_index < len(li_elements) - 1:
+                next_li = li_elements[current_index + 1]
+                next_text = next_li.text.strip()
+                if next_text:
+                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", next_li)
+                    time.sleep(0.5)
+                    self.driver.execute_script("arguments[0].click();", next_li)
+                    print(f"  [OK] Selected next city: '{next_text}'")
+                    time.sleep(0.5)
+                    return True
+            else:
+                print(f"  [INFO] Already at last city")
+                # Close dropdown by clicking outside or pressing ESC
+                try:
+                    from selenium.webdriver.common.keys import Keys
+                    dropdown_trigger.send_keys(Keys.ESCAPE)
+                except:
+                    pass
+                return False
+        except Exception as e:
+            print(f"  [WARNING] Could not select next city: {e}")
+            return False
+    
+    def _select_next_bank(self) -> bool:
+        """Select next bank from dropdown ext-gen1069. Returns True if successful, False if last bank."""
+        try:
+            # Click dropdown trigger
+            dropdown_trigger = self.driver.find_element(By.ID, "ext-gen1069")
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", dropdown_trigger)
+            time.sleep(0.5)
+            self.driver.execute_script("arguments[0].click();", dropdown_trigger)
+            
+            # Wait for dropdown to appear
+            time.sleep(0.5)
+            wait = WebDriverWait(self.driver, 5)
+            wait.until(EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'x-boundlist')] | //table")))
+            
+            # Get current selected bank
+            current_bank = self._get_current_selected_bank()
+            
+            # Get all bank options (try <tr> first, then <li>)
+            tr_elements = self.driver.find_elements(By.XPATH, "//div[contains(@class, 'x-boundlist')]//tr | //div[contains(@class, 'x-layer')]//tr")
+            if not tr_elements:
+                tr_elements = self.driver.find_elements(By.XPATH, "//tr")
+            
+            elements = tr_elements if tr_elements else []
+            if not elements:
+                # Fallback to <li>
+                li_elements = self.driver.find_elements(By.XPATH, "//li[@role='option' or contains(@class, 'x-boundlist-item')]")
+                if not li_elements:
+                    li_elements = self.driver.find_elements(By.XPATH, "//ul[contains(@class, 'x-list-plain')]//li")
+                elements = li_elements
+            
+            # Find current bank index and select next
+            current_index = -1
+            for i, elem in enumerate(elements):
+                if not elem.is_displayed():
+                    continue
+                elem_text = elem.text.strip()
+                if elem_text and (current_bank.lower() in elem_text.lower() or elem_text.lower() in current_bank.lower()):
+                    current_index = i
+                    break
+            
+            # Select next bank
+            if current_index >= 0 and current_index < len(elements) - 1:
+                next_elem = elements[current_index + 1]
+                next_text = next_elem.text.strip()
+                if next_text and next_elem.is_displayed():
+                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", next_elem)
+                    time.sleep(0.5)
+                    self.driver.execute_script("arguments[0].click();", next_elem)
+                    print(f"  [OK] Selected next bank: '{next_text[:50]}...'")
+                    time.sleep(0.5)
+                    return True
+            else:
+                print(f"  [INFO] Already at last bank")
+                # Close dropdown
+                try:
+                    from selenium.webdriver.common.keys import Keys
+                    dropdown_trigger.send_keys(Keys.ESCAPE)
+                except:
+                    pass
+                return False
+        except Exception as e:
+            print(f"  [WARNING] Could not select next bank: {e}")
+            return False
+    
+    def _select_first_bank(self) -> bool:
+        """Select first bank from dropdown ext-gen1069. Returns True if successful, False if no banks."""
+        try:
+            # Click dropdown trigger
+            dropdown_trigger = self.driver.find_element(By.ID, "ext-gen1069")
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", dropdown_trigger)
+            time.sleep(0.5)
+            self.driver.execute_script("arguments[0].click();", dropdown_trigger)
+            
+            # Wait for dropdown to appear
+            time.sleep(0.5)
+            wait = WebDriverWait(self.driver, 5)
+            wait.until(EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'x-boundlist')] | //table")))
+            
+            # Get all bank options using <span class="x-tree-node-text">
+            # But only within tr elements (to avoid selecting labels/headers)
+            # For first bank, use index 0 (first valid bank span)
+            span_elements = self.driver.find_elements(By.XPATH, "//tr//span[@class='x-tree-node-text']")
+            
+            if not span_elements:
+                # Fallback: try with contains
+                span_elements = self.driver.find_elements(By.XPATH, "//tr//span[contains(@class, 'x-tree-node-text')]")
+            
+            if span_elements:
+                # Filter out empty and non-visible spans, and filter out labels
+                valid_banks = []
+                skip_labels = ["Laporan Posisi Keuangan", "Laporan Laba Rugi", "Laporan", "Posisi", "Keuangan", "Laba", "Rugi"]
+                
+                for i, span in enumerate(span_elements):
+                    if not span.is_displayed():
+                        continue
+                    span_text = span.text.strip()
+                    if not span_text:
+                        continue
+                    
+                    # Skip if it's a known label (not a bank name)
+                    is_label = any(label.lower() in span_text.lower() for label in skip_labels)
+                    if is_label:
+                        continue
+                    
+                    # Bank names typically contain numbers
+                    has_number = any(char.isdigit() for char in span_text)
+                    
+                    if has_number or len(span_text) > 20:  # Bank names are usually longer
+                        valid_banks.append((i, span, span_text))
+                
+                # Select first bank (index 0)
+                if len(valid_banks) > 0:
+                    _, bank_span, bank_name = valid_banks[0]
+                    # Find the parent tr or clickable element to click
+                    try:
+                        parent_tr = bank_span.find_element(By.XPATH, "./ancestor::tr[1]")
+                        clickable_elem = parent_tr
+                    except:
+                        try:
+                            clickable_elem = bank_span.find_element(By.XPATH, "./ancestor::*[@role='row' or contains(@class, 'x-boundlist-item')][1]")
+                        except:
+                            clickable_elem = bank_span
+                    
+                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", clickable_elem)
+                    time.sleep(0.5)
+                    self.driver.execute_script("arguments[0].click();", clickable_elem)
+                    print(f"  [OK] Selected first bank (index 0): '{bank_name[:50]}...'")
+                    time.sleep(0.5)
+                    return True
+            else:
+                # Fallback: try tr elements
+                tr_elements = self.driver.find_elements(By.XPATH, "//tr[@data-boundview='treeview-1022']")
+                if tr_elements:
+                    for i, tr in enumerate(tr_elements):
+                        if not tr.is_displayed():
+                            continue
+                        tr_text = tr.text.strip()
+                        if tr_text:
+                            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", tr)
+                            time.sleep(0.5)
+                            self.driver.execute_script("arguments[0].click();", tr)
+                            print(f"  [OK] Selected first bank (fallback, index {i}): '{tr_text[:50]}...'")
+                            time.sleep(0.5)
+                            return True
+            
+            return False
+        except Exception as e:
+            print(f"  [WARNING] Could not select first bank: {e}")
+            return False
+    
+    def _click_tampilkan_and_extract_data(self, year: str, city: str, bank: str) -> dict:
+        """Click Tampilkan button, wait for report, and extract data"""
+        try:
+            # Make sure we're on default content and close any open dropdowns
+            self.driver.switch_to.default_content()
+            time.sleep(0.3)
+            
+            # Close any open dropdowns by pressing ESC
+            try:
+                from selenium.webdriver.common.keys import Keys
+                body = self.driver.find_element(By.TAG_NAME, "body")
+                body.send_keys(Keys.ESCAPE)
+                time.sleep(0.3)
+            except:
+                pass
+            
+            # Click Tampilkan button
             tampilkan_button = None
             try:
                 tampilkan_button = self.driver.find_element(By.ID, "ShowReportButton-btnInnerEl")
-                print("  [OK] Found 'Tampilkan' button")
             except:
-                # Try alternative: find by text content
                 tampilkan_button = self.driver.find_element(By.XPATH, "//span[contains(text(), 'Tampilkan')]")
-                print("  [OK] Found 'Tampilkan' button by text")
             
-            # Scroll to button and click
-            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center', behavior: 'smooth'});", tampilkan_button)
-            time.sleep(0.5)  # Wait for scroll
-            
-            # Try clicking with JavaScript first
-            try:
-                self.driver.execute_script("arguments[0].click();", tampilkan_button)
-                print("  [OK] Clicked 'Tampilkan' button (JavaScript click)")
-            except:
-                # Fallback to regular click
-                try:
-                    tampilkan_button.click()
-                    print("  [OK] Clicked 'Tampilkan' button (regular click)")
-                except Exception as click_error:
-                    print(f"  [ERROR] Failed to click 'Tampilkan' button: {click_error}")
-                    raise
-            
-            # Wait a moment to ensure click is processed
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", tampilkan_button)
             time.sleep(0.5)
-            print("  [INFO] Tampilkan button click confirmed. Waiting for report to load...")
+            self.driver.execute_script("arguments[0].click();", tampilkan_button)
+            print(f"  [OK] Clicked 'Tampilkan' button")
             
-            # Wait 1 minute and check for identifiers
-            print("  [INFO] Waiting up to 60 seconds for report to load and checking for identifiers...")
-            self._wait_for_report_loaded(max_wait=60)
-            print("  [OK] Wait completed. Proceeding to extract data...")
+            # Wait for report to load
+            print(f"  [INFO] Waiting for report to load...")
+            self._wait_for_report_loaded(max_wait=30)
             
+            # Extract data - use the provided city and bank names (from dropdown)
+            extracted_data = self._extract_report_data(year, city, bank)
+            return extracted_data
         except Exception as e:
-            print(f"  [WARNING] Error clicking 'Tampilkan' button: {e}")
-            # Still wait 1 minute even if button click failed
-            print("  [INFO] Waiting 1 minute anyway...")
-            self._wait_for_report_loaded(max_wait=60)
+            print(f"  [ERROR] Error in _click_tampilkan_and_extract_data: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    def _initialize_excel(self, year: str):
+        """Initialize Excel workbook and worksheet"""
+        if not Workbook:
+            print("  [ERROR] openpyxl not installed. Cannot create Excel file.")
+            return
         
-        # Always proceed to extract data (will create Excel with whatever is found)
-        report_loaded = True
+        self.excel_wb = Workbook()
+        self.excel_ws = self.excel_wb.active
+        self.excel_ws.title = f"OJK Report {year}"
+        self.excel_row = 1
         
-        if report_loaded:
-            # Extract data from the generated report
-            print("\n  [Step 4.5] Extracting data from report...")
-            extracted_data = self._extract_report_data(year)
+        # Set column widths
+        self.excel_ws.column_dimensions['A'].width = 30
+        self.excel_ws.column_dimensions['B'].width = 30
+        self.excel_ws.column_dimensions['C'].width = 20
+        self.excel_ws.column_dimensions['D'].width = 20
+        
+        print(f"  [OK] Excel file initialized")
+    
+    def _append_to_excel(self, data: dict, year: str, city: str, bank: str, is_first_bank_in_city: bool):
+        """Append extracted data to Excel worksheet"""
+        if not self.excel_wb or not self.excel_ws:
+            print("  [ERROR] Excel not initialized")
+            return
+        
+        try:
+            from openpyxl.styles import Font
             
-            if extracted_data:
-                # Save to Excel
-                print("\n  [Step 4.6] Saving data to Excel...")
-                success = self._save_to_excel(extracted_data, year)
-                if success:
-                    return  # Browser will be closed in _save_to_excel
-            else:
-                print("  [ERROR] Failed to extract data from report")
-        else:
-            print("  [ERROR] Report did not load. Cannot extract data.")
+            previous_year = str(int(year) - 1)
+            
+            # Add blank row if not first bank in city
+            if not is_first_bank_in_city:
+                self.excel_row += 1
+            
+            # Row: Kota/Kabupaten
+            self.excel_ws[f'A{self.excel_row}'] = f"Kota/Kabupaten: {city}"
+            self.excel_ws[f'A{self.excel_row}'].font = Font(bold=True)
+            self.excel_row += 1
+            
+            # Row: Bank
+            self.excel_ws[f'A{self.excel_row}'] = f"Bank: {bank}"
+            self.excel_ws[f'A{self.excel_row}'].font = Font(bold=True)
+            self.excel_row += 1
+            
+            # Row: Kredit
+            kredit_current = data.get(f'Kredit {year}', 0)
+            kredit_previous = data.get(f'Kredit {previous_year}', 0)
+            self.excel_ws[f'A{self.excel_row}'] = f"Kredit {year}:"
+            self.excel_ws[f'B{self.excel_row}'] = f"{kredit_current:,.0f}".replace(',', '.') if isinstance(kredit_current, (int, float)) else str(kredit_current)
+            self.excel_ws[f'C{self.excel_row}'] = f"Kredit {previous_year}:"
+            self.excel_ws[f'D{self.excel_row}'] = f"{kredit_previous:,.0f}".replace(',', '.') if isinstance(kredit_previous, (int, float)) else str(kredit_previous)
+            self.excel_row += 1
+            
+            # Row: Total Aset
+            total_aset_current = data.get(f'Total Aset {year}', 0)
+            total_aset_previous = data.get(f'Total Aset {previous_year}', 0)
+            self.excel_ws[f'A{self.excel_row}'] = f"Total Aset {year}:"
+            self.excel_ws[f'B{self.excel_row}'] = f"{total_aset_current:,.0f}".replace(',', '.') if isinstance(total_aset_current, (int, float)) else str(total_aset_current)
+            self.excel_ws[f'C{self.excel_row}'] = f"Total Aset {previous_year}:"
+            self.excel_ws[f'D{self.excel_row}'] = f"{total_aset_previous:,.0f}".replace(',', '.') if isinstance(total_aset_previous, (int, float)) else str(total_aset_previous)
+            self.excel_row += 1
+            
+            # Row: DPK
+            dpk_current = data.get(f'DPK {year}', 0)
+            dpk_previous = data.get(f'DPK {previous_year}', 0)
+            self.excel_ws[f'A{self.excel_row}'] = f"DPK {year}:"
+            self.excel_ws[f'B{self.excel_row}'] = f"{dpk_current:,.0f}".replace(',', '.') if isinstance(dpk_current, (int, float)) else str(dpk_current)
+            self.excel_ws[f'C{self.excel_row}'] = f"DPK {previous_year}:"
+            self.excel_ws[f'D{self.excel_row}'] = f"{dpk_previous:,.0f}".replace(',', '.') if isinstance(dpk_previous, (int, float)) else str(dpk_previous)
+            self.excel_row += 1
+            
+            print(f"  [OK] Appended data to Excel (row {self.excel_row - 1})")
+        except Exception as e:
+            print(f"  [ERROR] Error appending to Excel: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _finalize_excel(self, year: str):
+        """Save and close Excel workbook"""
+        if not self.excel_wb:
+            print("  [ERROR] Excel not initialized")
+            return
+        
+        try:
+            filename = f"OJK_Report_{year}.xlsx"
+            filepath = self.output_dir / filename
+            self.excel_wb.save(filepath)
+            print(f"  [OK] Excel file saved to {filepath}")
+            print(f"  [OK] Total rows written: {self.excel_row - 1}")
+        except Exception as e:
+            print(f"  [ERROR] Error saving Excel file: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _find_combo_name_by_keyword(self, keyword: str) -> str:
         """
@@ -1004,12 +1449,14 @@ class OJKExtJSScraper:
         print(f"    [DEBUG] Wait completed. Found identifiers: {found_identifiers}")
         return True
     
-    def _extract_report_data(self, selected_year: str) -> dict:
+    def _extract_report_data(self, selected_year: str, city: str = None, bank: str = None) -> dict:
         """
         Extract financial data from the generated report
         
         Args:
             selected_year: The selected year (e.g., "2024")
+            city: The selected city (optional, will try to extract from page if not provided)
+            bank: The selected bank (optional, will try to extract from page if not provided)
             
         Returns:
             Dictionary with extracted data
@@ -1138,9 +1585,9 @@ class OJKExtJSScraper:
                     return self.driver.page_source, None
             
             # Validation: Wait for page to fully load by checking if records are found by identifiers
-            print("    [INFO] Memvalidasi halaman telah dimuat sepenuhnya (memeriksa identifier setiap 30 detik)...")
-            max_wait_attempts = 20  # Maximum 20 attempts = 10 minutes (20 * 30s = 600s)
-            wait_interval = 30  # Wait 30 seconds between checks
+            print("    [INFO] Memvalidasi halaman telah dimuat sepenuhnya (memeriksa identifier setiap 10 detik)...")
+            max_wait_attempts = 20  # Maximum 20 attempts = 200 seconds (20 * 10s = 200s)
+            wait_interval = 10  # Wait 10 seconds between checks
             page_fully_loaded = False
             soup = None
             
@@ -1174,7 +1621,7 @@ class OJKExtJSScraper:
                 # Ensure soup is parsed with latest page_source
                 if soup is None:
                     page_source, report_iframe = refresh_page_source(report_iframe)
-                    soup = BeautifulSoup(page_source, 'html.parser')
+                soup = BeautifulSoup(page_source, 'html.parser')
             
             # Helper function to split concatenated numbers (current year + previous year)
             def split_concatenated_numbers(text: str) -> tuple[str, str]:
@@ -1375,82 +1822,88 @@ class OJKExtJSScraper:
             result = {}
             previous_year = str(int(selected_year) - 1)
             
-            # Extract Kota/Kabupaten and Bank from page source
+            # Use provided city and bank, or extract from page source
             print("    [INFO] Extracting Kota/Kabupaten and Bank...")
-            city = ""
-            bank = ""
+            extracted_city = city if city else ""
+            extracted_bank = bank if bank else ""
             
-            try:
-                # Switch to default content to access form fields
-                self.driver.switch_to.default_content()
-                
-                # Try to find city and bank from input fields using Selenium
+            # Only try to extract from page if not provided
+            if not extracted_city or not extracted_bank:
                 try:
-                    # Look for city input field
-                    city_inputs = [
-                        self.driver.find_elements(By.XPATH, "//input[contains(@id, 'City') or contains(@id, 'Kota') or contains(@id, 'Kabupaten')]"),
-                        self.driver.find_elements(By.XPATH, "//input[contains(@name, 'City') or contains(@name, 'Kota') or contains(@name, 'Kabupaten')]")
-                    ]
-                    for inputs in city_inputs:
-                        for inp in inputs:
-                            try:
-                                value = inp.get_attribute('value')
-                                if value and value.strip():
-                                    city = value.strip()
-                                    print(f"    [DEBUG] Found city from input field: '{city}'")
-                                    break
-                            except:
-                                continue
-                        if city:
-                            break
-                except Exception as e:
-                    print(f"    [DEBUG] Could not find city input: {e}")
-                
-                try:
-                    # Look for bank input field
-                    bank_inputs = [
-                        self.driver.find_elements(By.XPATH, "//input[contains(@id, 'Bank')]"),
-                        self.driver.find_elements(By.XPATH, "//input[contains(@name, 'Bank')]")
-                    ]
-                    for inputs in bank_inputs:
-                        for inp in inputs:
-                            try:
-                                value = inp.get_attribute('value')
-                                if value and value.strip():
-                                    bank = value.strip()
-                                    print(f"    [DEBUG] Found bank from input field: '{bank}'")
-                                    break
-                            except:
-                                continue
-                        if bank:
-                            break
-                except Exception as e:
-                    print(f"    [DEBUG] Could not find bank input: {e}")
-                
-                # Fallback: Try to find from BeautifulSoup parsed page
-                if not city or not bank:
-                    city_inputs = soup.find_all('input', {'id': lambda x: x and ('city' in x.lower() or 'kota' in x.lower() or 'kabupaten' in x.lower())})
-                    bank_inputs = soup.find_all('input', {'id': lambda x: x and 'bank' in x.lower()})
+                    # Switch to default content to access form fields
+                    self.driver.switch_to.default_content()
                     
-                    for inp in city_inputs:
-                        value = inp.get('value', '')
-                        if value and value.strip():
-                            city = value.strip()
-                            print(f"    [DEBUG] Found city from soup: '{city}'")
-                            break
+                    # Try to find city and bank from input fields using Selenium
+                    if not extracted_city:
+                        try:
+                            # Look for city input field
+                            city_inputs = [
+                                self.driver.find_elements(By.XPATH, "//input[contains(@id, 'City') or contains(@id, 'Kota') or contains(@id, 'Kabupaten')]"),
+                                self.driver.find_elements(By.XPATH, "//input[contains(@name, 'City') or contains(@name, 'Kota') or contains(@name, 'Kabupaten')]")
+                            ]
+                            for inputs in city_inputs:
+                                for inp in inputs:
+                                    try:
+                                        value = inp.get_attribute('value')
+                                        if value and value.strip():
+                                            extracted_city = value.strip()
+                                            print(f"    [DEBUG] Found city from input field: '{extracted_city}'")
+                                            break
+                                    except:
+                                        continue
+                                if extracted_city:
+                                    break
+                        except Exception as e:
+                            print(f"    [DEBUG] Could not find city input: {e}")
                     
-                    for inp in bank_inputs:
-                        value = inp.get('value', '')
-                        if value and value.strip():
-                            bank = value.strip()
-                            print(f"    [DEBUG] Found bank from soup: '{bank}'")
-                            break
+                    if not extracted_bank:
+                        try:
+                            # Look for bank input field
+                            bank_inputs = [
+                                self.driver.find_elements(By.XPATH, "//input[contains(@id, 'Bank')]"),
+                                self.driver.find_elements(By.XPATH, "//input[contains(@name, 'Bank')]")
+                            ]
+                            for inputs in bank_inputs:
+                                for inp in inputs:
+                                    try:
+                                        value = inp.get_attribute('value')
+                                        if value and value.strip():
+                                            extracted_bank = value.strip()
+                                            print(f"    [DEBUG] Found bank from input field: '{extracted_bank}'")
+                                            break
+                                    except:
+                                        continue
+                                if extracted_bank:
+                                    break
+                        except Exception as e:
+                            print(f"    [DEBUG] Could not find bank input: {e}")
+                    
+                    # Fallback: Try to find from BeautifulSoup parsed page
+                    if not extracted_city or not extracted_bank:
+                        city_inputs = soup.find_all('input', {'id': lambda x: x and ('city' in x.lower() or 'kota' in x.lower() or 'kabupaten' in x.lower())})
+                        bank_inputs = soup.find_all('input', {'id': lambda x: x and 'bank' in x.lower()})
+                        
+                        if not extracted_city:
+                            for inp in city_inputs:
+                                value = inp.get('value', '')
+                                if value and value.strip():
+                                    extracted_city = value.strip()
+                                    print(f"    [DEBUG] Found city from soup: '{extracted_city}'")
+                                    break
+                        
+                        if not extracted_bank:
+                            for inp in bank_inputs:
+                                value = inp.get('value', '')
+                                if value and value.strip():
+                                    extracted_bank = value.strip()
+                                    print(f"    [DEBUG] Found bank from soup: '{extracted_bank}'")
+                                    break
                 
-            except Exception as e:
-                print(f"    [WARNING] Could not extract city/bank: {e}")
+                except Exception as e:
+                    print(f"    [WARNING] Could not extract city/bank: {e}")
             
-            result['city'] = city if city else "N/A"
-            result['bank'] = bank if bank else "N/A"
+            result['city'] = extracted_city if extracted_city else "N/A"
+            result['bank'] = extracted_bank if extracted_bank else "N/A"
             
             # Extract Kredit data only - Sum of 4 identifiers
             print("    [INFO] Extracting Kredit data...")
@@ -1506,11 +1959,12 @@ class OJKExtJSScraper:
                 result[f'Total Aset {previous_year}'] = 0
                 print(f"    [WARNING] Total Aset data not found")
             
-            # Extract DPK data - Sum of Tabungan and Deposito for each year
-            print("    [INFO] Extracting DPK data (Tabungan + Deposito)...")
+            # Extract DPK data - Sum of Tabungan, Deposito, and Simpanan dari Bank Lain for each year
+            print("    [INFO] Extracting DPK data (Tabungan + Deposito + Simpanan dari Bank Lain)...")
             dpk_identifiers = [
                 "Tabungan",
-                "Deposito"
+                "Deposito",
+                "Simpanan dari Bank Lain"
             ]
             dpk_selected_year = 0
             dpk_previous_year = 0
