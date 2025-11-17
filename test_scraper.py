@@ -29,7 +29,6 @@ def main():
     try:
         scraper.initialize()
         scraper.navigate_to_page()
-        scraper.select_tab_bpr_konvensional()
         
         # Test: Set month, year, and select province
         print("\n[TEST] Testing month, year, and province selection...")
@@ -40,19 +39,12 @@ def main():
         import traceback
         traceback.print_exc()
     finally:
-        # Don't close browser - keep it open for inspection
+        # Cleanup Selenium resources
         print("\n[OK] Test completed")
-        print("[INFO] Browser will remain open for inspection. Close it manually when done.")
-        print("[INFO] Press ENTER to exit and close the browser...")
-        try:
-            input()  # Wait for user to press Enter before script ends
-        except EOFError:
-            # Handle non-interactive environments (like CI/CD)
-            print("[INFO] Non-interactive environment detected. Browser will remain open.")
-            import time
-            time.sleep(300)  # Wait 5 minutes as fallback
-        # Optionally close browser when user presses Enter:
-        # scraper.cleanup()
+        print("[INFO] Membersihkan sumber daya Selenium...")
+        # Use kill_processes=True to ensure all Chrome processes are terminated
+        scraper.cleanup(kill_processes=True)
+        print("[OK] Semua sumber daya telah dibersihkan")
 
 
 if __name__ == "__main__":
