@@ -60,6 +60,9 @@ class OJKExtJSScraper:
         self.excel_wb = None  # Workbook for appending data
         self.excel_ws = None  # Worksheet for appending data
         self.excel_row = 1  # Current row in Excel
+        self.all_data = []  # Store all extracted data for final Excel generation
+        self.sheets_1_3_data = []  # Store data for Sheets 1-3 (ASET, Kredit, DPK)
+        self.sheets_4_5_data = []  # Store data for Sheets 4-5 (Laba Kotor, Rasio)
     
     def initialize(self):
         """Initialize WebDriver and ExtJS helper"""
@@ -67,6 +70,14 @@ class OJKExtJSScraper:
             self.driver = SeleniumSetup.create_driver(headless=self.headless)
             self.wait = SeleniumSetup.create_wait(self.driver)
             self.extjs = ExtJSHelper(self.driver, self.wait)
+            
+            # Minimize Chrome window (but keep it visible, not headless)
+            if not self.headless:
+                try:
+                    self.driver.minimize_window()
+                    print("[INFO] Chrome window minimized")
+                except Exception as e:
+                    print(f"[WARNING] Could not minimize Chrome window: {e}")
     
     def navigate_to_page(self):
         """Navigate directly to BPR Konvensional report page"""
@@ -150,15 +161,75 @@ class OJKExtJSScraper:
         
         print("[WARNING] ExtJS not available yet, but will continue (it may load after page fully loads)")
     
-    def scrape_all_data(self, month: str = "Desember", year: str = "2024"):
+    def _get_target_month_year(self) -> tuple[str, str]:
+        """
+        Determine target month and year based on current date.
+        Finds the most recent quarter-end month (Maret, Juni, September, Desember) 
+        that is backward (in the past) from current date.
+        
+        Returns:
+            Tuple of (month_name, year) e.g., ("September", "2025")
+        """
+        from datetime import datetime
+        
+        now = datetime.now()
+        current_month = now.month
+        current_year = now.year
+        
+        # Available quarter-end months mapping:
+        # 03 is Maret
+        # 06 is Juni
+        # 09 is September
+        # 12 is Desember
+        quarter_months = [3, 6, 9, 12]  # March, June, September, December
+        month_names = {
+            3: "Maret",   # 03
+            6: "Juni",    # 06
+            9: "September",  # 09
+            12: "Desember"   # 12
+        }
+         
+        # Find the largest quarter month that is <= current month
+        target_month_num = None
+        target_year = current_year
+        
+        for qm in sorted(quarter_months, reverse=True):
+            if qm <= current_month:
+                target_month_num = qm
+                target_year = current_year
+                break
+        
+        # If no quarter month found (e.g., January/February), use December of previous year
+        # Example: January 2026 -> December 2025
+        if target_month_num is None:
+            target_month_num = 12  # Desember
+            target_year = current_year - 1
+        
+        month_name = month_names[target_month_num]
+        
+        print(f"[INFO] Current date: {now.strftime('%B %Y')}")
+        print(f"[INFO] Target month/year: {month_name} {target_year}")
+        
+        return month_name, str(target_year)
+    
+    def scrape_all_data(self, month: str = None, year: str = None):
         """
         Main scraping loop
         Iterates through all provinces, cities, and banks
         
+        Flow:
+        1. Check first checkbox → iterate all cities/banks → generate Sheets 1-3 (ASET, Kredit, DPK)
+        2. Change checkboxes (uncheck first, check two new ones) → iterate all cities/banks again → generate Sheets 4-5 (Laba Kotor, Rasio)
+        
         Args:
-            month: Month to select (e.g., "Desember")
-            year: Year to select (e.g., "2024")
+            month: Month to select (e.g., "Desember"). If None, auto-detects based on current date.
+            year: Year to select (e.g., "2024"). If None, auto-detects based on current date.
         """
+        # Auto-detect month and year if not provided
+        if month is None or year is None:
+            detected_month, detected_year = self._get_target_month_year()
+            month = month or detected_month
+            year = year or detected_year
         if self.driver is None:
             self.initialize()
         
@@ -288,8 +359,11 @@ class OJKExtJSScraper:
                 print("[WARNING] No comboboxes found - will try to continue anyway")
         
         # Step 2: Select year by typing directly into input field
-        print(f"\n[Step 2] Selecting year: 2024 (hardcoded)")
+        print(f"\n[Step 2] Selecting year: {year}")
         time.sleep(0.5)
+        
+        # Store the year from input field for Excel labeling
+        excel_year = year  # Default to provided year
         
         try:
             # Find year input field by ID
@@ -298,13 +372,28 @@ class OJKExtJSScraper:
             
             # Clear and type the year
             year_input.clear()
-            year_input.send_keys("2024")
-            print("[OK] Typed '2024' into year input field")
+            year_input.send_keys(year)
+            print(f"[OK] Typed '{year}' into year input field")
             
             # Trigger change event (press Tab)
             from selenium.webdriver.common.keys import Keys
             year_input.send_keys(Keys.TAB)
             time.sleep(0.5)  # Wait for PostBack
+            
+            # Read the actual value from the input field for Excel labeling
+            try:
+                excel_year = year_input.get_attribute('value')
+                if not excel_year:
+                    excel_year = year_input.get_property('value')
+                if excel_year:
+                    print(f"[OK] Read year from input field for Excel: {excel_year}")
+                else:
+                    excel_year = year  # Fallback to original year
+                    print(f"[WARNING] Could not read year from input field, using provided year: {year}")
+            except Exception as e:
+                excel_year = year  # Fallback to original year
+                print(f"[WARNING] Error reading year from input field: {e}, using provided year: {year}")
+            
             print("[INFO] Waiting 1 second buffer after year selection...")
             time.sleep(0.5)  # Buffer between dropdown selections
         except Exception as e:
@@ -409,50 +498,53 @@ class OJKExtJSScraper:
         
         # Step 4: Select initial dropdowns and checkboxes (only once at start)
         print("\n[Step 4] Starting initial dropdown and checkbox selection...")
+        print("[INFO] Setting up for Sheets 1-3 (ASET, Kredit, DPK)...")
+        
+        # Normal flow: First 3 sheets
         self._select_initial_dropdowns_and_checkboxes()
         
         # Wait a bit after checkbox is ticked to ensure dropdowns are ready
         print("\n[INFO] Waiting for dropdowns to be ready after checkbox selection...")
-        time.sleep(2.0)
+        time.sleep(1.0)  # Reduced by 50% (was 2.0)
         
         # Initialize Excel file
         self._initialize_excel(year)
+        # Initialize separate data lists for Sheets 1-3 and Sheets 4-5
+        self.sheets_1_3_data = []
+        self.sheets_4_5_data = []
         
-        # Step 5: Sequential iteration through cities and banks
-        # This starts AFTER checkbox is ticked - we iterate through all city/bank combinations
-        print("\n[Step 5] Starting sequential iteration through all cities and banks...")
+        # Step 5: Sequential iteration through cities and banks for Sheets 1-3
+        # This starts AFTER checkbox is ticked - we iterate through 2 cities (index 0 and 1), then all banks
+        print("\n[Step 5] Starting sequential iteration through 2 cities and all banks for Sheets 1-3...")
+        print("[INFO] TEST MODE: Limiting to 2 cities (index 0 and 1) for testing")
         print("[INFO] Iteration starts after checkbox is ticked - will select city, then bank, then click Tampilkan for each combination")
-        city_index = 0  # Start with first city (index 0)
-        is_first_bank_in_city = True
-        done = False
         
-        # Get the first city (starts iteration after checkbox)
-        print(f"\n[INFO] Getting first city (index {city_index})...")
-        current_city = self._get_city_by_index(city_index)
-        if not current_city:
-            print(f"  [WARNING] No cities found at index {city_index}. This might be a timing issue or no cities available.")
-            print(f"  [INFO] Scraping completed!")
-            done = True
-        
-        while not done:
+        # Iterate through 2 cities (index 0 and 1)
+        max_cities = 2
+        for city_index in range(max_cities):
+            print(f"\n{'='*60}")
+            print(f"[CITY ({city_index+1}/{max_cities})] Processing city at index {city_index}...")
+            print(f"{'='*60}")
+            
+            # Get city by index
+            current_city = self._get_city_by_index(city_index)
             if not current_city:
-                print(f"  [INFO] No more cities. Scraping completed!")
-                done = True
-                break
+                print(f"  [WARNING] No city found at index {city_index}. Skipping...")
+                continue
+            
+            is_first_bank_in_city = True
             
             # Get all banks for this city (only once per city)
             # Wait a bit after city selection to ensure dropdown is ready
-            time.sleep(2.0)  # Wait for city selection to fully load
-            print(f"\n{'='*60}")
-            print(f"[CITY] Processing: {current_city}")
-            print(f"{'='*60}")
+            time.sleep(1.0)  # Wait for city selection to fully load (reduced by 50%)
+            print(f"\n[INFO] Processing: {current_city}")
             bank_names = self._get_all_bank_names(city_index, city_already_selected=True)
             print(f"  [INFO] Found {len(bank_names)} banks in {current_city}")
             
             # If no banks found, wait a bit and retry once
             if not bank_names:
                 print(f"  [WARNING] No banks found on first attempt, waiting and retrying...")
-                time.sleep(3.0)
+                time.sleep(1.5)  # Reduced by 50% (was 3.0)
                 bank_names = self._get_all_bank_names(city_index, city_already_selected=True)
                 print(f"  [INFO] Found {len(bank_names)} banks in {current_city} (retry)")
             
@@ -465,6 +557,7 @@ class OJKExtJSScraper:
                 
             # Iterate through all banks in this city
             for bank_index, current_bank in enumerate(bank_names):
+                    
                 print(f"\n  [BANK ({bank_index+1}/{len(bank_names)})] Processing: {current_bank}")
                 
                 # Select the bank by index (bank_index = 0 selects first span, bank_index = 1 selects second, etc.)
@@ -478,22 +571,22 @@ class OJKExtJSScraper:
                         break
                     elif retry < max_retries - 1:
                         print(f"  [WARNING] Could not select bank at index {bank_index}, retrying ({retry+1}/{max_retries})...")
-                        time.sleep(2.0)  # Wait longer before retry
+                        time.sleep(1.0)  # Wait before retry (reduced by 50%)
                 
                 if not selected_bank_name:
                     print(f"  [WARNING] Could not select bank at index {bank_index} after {max_retries} attempts")
                     continue
                 
-                time.sleep(2.0)  # Wait longer for bank selection to load (slower speed)
+                time.sleep(1.0)  # Wait for bank selection to load (reduced by 50%)
                 
                 # Click Tampilkan and extract data - MUST complete before moving to next bank
                 print(f"  [INFO] Clicking Tampilkan and waiting for data extraction to complete...")
-                extracted_data = self._click_tampilkan_and_extract_data(year, current_city, selected_bank_name)
+                extracted_data = self._click_tampilkan_and_extract_data(year, current_city, selected_bank_name, extract_mode='sheets_1_3')
                 
                 if extracted_data:
-                    # Append to Excel - this must complete before moving to next bank
-                    print(f"  [INFO] Appending data to Excel...")
-                    self._append_to_excel(extracted_data, year, current_city, selected_bank_name, is_first_bank_in_city)
+                    # Store data for later Excel generation
+                    print(f"  [INFO] Storing data...")
+                    self._append_to_excel(extracted_data, year, current_city, selected_bank_name, is_first_bank_in_city, data_list='sheets_1_3')
                     print(f"  [OK] Data successfully extracted and saved to Excel for {current_city} - {selected_bank_name}")
                     is_first_bank_in_city = False
                     # Wait longer to ensure Excel data is fully written
@@ -506,19 +599,134 @@ class OJKExtJSScraper:
                     print(f"  [INFO] This is the last bank ({bank_index+1}/{len(bank_names)}) in {current_city}")
                     time.sleep(1.0)  # Additional wait after last bank
             
-            # After processing ALL banks in this city, move to next city
-            print(f"  [INFO] Finished processing all {len(bank_names)} banks in {current_city}, moving to next city...")
-            time.sleep(1.0)  # Wait before changing city
-            city_index += 1
-            current_city = self._get_city_by_index(city_index)
-            is_first_bank_in_city = True
+            # After processing ALL banks in this city, move to next city (if not last)
+            print(f"  [INFO] Finished processing all {len(bank_names)} banks in {current_city}")
+            if city_index < max_cities - 1:
+                print(f"  [INFO] Moving to next city...")
+                time.sleep(1.0)  # Wait before changing city
         
-        # Finalize Excel file
-        self._finalize_excel(year)
+        # Now proceed to Sheet 4: Laba Kotor
+        print("\n" + "="*60)
+        print("[INFO] Starting Sheet 4: Laba Kotor")
+        print("="*60)
+        
+        # Change checkboxes: uncheck first, check the two new ones
+        self._change_checkboxes_for_laba_kotor()
+        
+        # Wait for checkboxes to be ready
+        print("\n[INFO] Waiting for checkboxes to be ready...")
+        time.sleep(1.0)
+        
+        # Clear data storage for Laba Kotor (use separate list)
+        self.sheets_4_5_data = []
+        
+        # Re-iterate through 2 cities and all banks for Laba Kotor
+        print("\n[INFO] TEST MODE: Limiting to 2 cities (index 0 and 1) for testing")
+        
+        # Iterate through 2 cities (index 0 and 1)
+        max_cities = 2
+        for city_index in range(max_cities):
+            print(f"\n{'='*60}")
+            print(f"[CITY ({city_index+1}/{max_cities})] Processing city at index {city_index} (Laba Kotor)...")
+            print(f"{'='*60}")
+            
+            # Get city by index
+            current_city = self._get_city_by_index(city_index)
+            if not current_city:
+                print(f"  [WARNING] No city found at index {city_index}. Skipping...")
+                continue
+            
+            is_first_bank_in_city = True
+            
+            # Get all banks for this city
+            time.sleep(1.0)
+            print(f"\n[INFO] Processing: {current_city} (Laba Kotor)")
+            bank_names = self._get_all_bank_names(city_index, city_already_selected=True)
+            print(f"  [INFO] Found {len(bank_names)} banks in {current_city}")
+            
+            if not bank_names:
+                print(f"  [WARNING] No banks found on first attempt, waiting and retrying...")
+                time.sleep(1.5)
+                bank_names = self._get_all_bank_names(city_index, city_already_selected=True)
+                print(f"  [INFO] Found {len(bank_names)} banks in {current_city} (retry)")
+            
+            if not bank_names:
+                print(f"  [WARNING] No banks found in {current_city}, moving to next city...")
+                city_index += 1
+                current_city = self._get_city_by_index(city_index)
+                is_first_bank_in_city = True
+                continue
+                
+            # Iterate through all banks in this city
+            for bank_index, current_bank in enumerate(bank_names):
+                    
+                print(f"\n  [BANK ({bank_index+1}/{len(bank_names)})] Processing: {current_bank}")
+                
+                # Select the bank by index
+                max_retries = 3 if bank_index == 0 else 1
+                selected_bank_name = None
+                
+                for retry in range(max_retries):
+                    selected_bank_name = self._select_bank_by_index(bank_index, city_index, city_already_selected=True)
+                    if selected_bank_name:
+                        break
+                    elif retry < max_retries - 1:
+                        print(f"  [WARNING] Could not select bank at index {bank_index}, retrying ({retry+1}/{max_retries})...")
+                        time.sleep(1.0)
+                
+                if not selected_bank_name:
+                    print(f"  [WARNING] Could not select bank at index {bank_index} after {max_retries} attempts")
+                    continue
+                
+                time.sleep(1.0)
+                
+                # Click Tampilkan and extract data - for Sheets 4-5
+                print(f"  [INFO] Clicking Tampilkan and waiting for data extraction to complete...")
+                extracted_data = self._click_tampilkan_and_extract_data(year, current_city, selected_bank_name, extract_mode='sheets_4_5')
+                
+                if extracted_data:
+                    # Store data for later Excel generation
+                    self._append_to_excel(extracted_data, year, current_city, selected_bank_name, is_first_bank_in_city, data_list='sheets_4_5')
+                    print(f"  [OK] Data successfully extracted and saved for {current_city} - {selected_bank_name}")
+                    is_first_bank_in_city = False
+                    time.sleep(1.0)
+                else:
+                    print(f"  [WARNING] Failed to extract data for {current_city} - {selected_bank_name}")
+                
+                # Check if this is the last bank
+                if bank_index == len(bank_names) - 1:
+                    print(f"  [INFO] This is the last bank ({bank_index+1}/{len(bank_names)}) in {current_city}")
+                    time.sleep(1.0)
+            
+            # After processing ALL banks in this city, move to next city (if not last)
+            print(f"  [INFO] Finished processing all {len(bank_names)} banks in {current_city}")
+            if city_index < max_cities - 1:
+                print(f"  [INFO] Moving to next city...")
+                time.sleep(1.0)  # Wait before changing city
         
         print("\n[OK] All data collection completed!")
         print("[INFO] Closing browser...")
         self.cleanup()
+        
+        # Create Excel file after browser is closed
+        print("\n" + "="*60)
+        print("[INFO] Creating Excel file with all sheets...")
+        print("="*60)
+        
+        # Finalize Excel file with first 3 sheets (ASET, Kredit, DPK)
+        # Use excel_year (from input field) for Excel labeling to ensure correct year
+        self._finalize_excel(month, excel_year)
+        
+        # Finalize Excel file with Sheet 4 (Laba Kotor)
+        self._finalize_excel_laba_kotor(month, excel_year)
+        
+        # Finalize Excel file with Sheet 5 (Rasio) - 9 tables
+        print("\n" + "="*60)
+        print("[INFO] Starting Sheet 5: Rasio (9 tables)")
+        print("="*60)
+        self._finalize_excel_rasio(month, excel_year)
+        
+        print("\n[OK] Excel file created successfully!")
     
     def _tick_checkboxes(self):
         """
@@ -732,6 +940,74 @@ class OJKExtJSScraper:
         
         print("  [OK] Completed initial setup (dropdowns and checkbox)")
     
+    def _change_checkboxes_for_laba_kotor(self):
+        """Change checkboxes: uncheck treeview-1012-record-BPK-901-000001, check the two new ones"""
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        
+        print("\n[INFO] Changing checkboxes for Laba Kotor...")
+        
+        # Uncheck first checkbox
+        treeview_id_uncheck = "treeview-1012-record-BPK-901-000001"
+        print(f"  [INFO] Unchecking: {treeview_id_uncheck}")
+        try:
+            wait = WebDriverWait(self.driver, 10)
+            treeview_element = wait.until(
+                EC.presence_of_element_located((By.ID, treeview_id_uncheck))
+            )
+            
+            # Find checkboxes
+            checkboxes = treeview_element.find_elements(By.XPATH, ".//*[contains(@class, 'x-tree-checkbox') or contains(@class, 'tree-checkbox') or @role='checkbox' or @type='checkbox']")
+            if not checkboxes:
+                checkboxes = treeview_element.find_elements(By.XPATH, ".//*[@aria-checked]")
+            
+            if checkboxes:
+                checkbox = checkboxes[0]
+                aria_checked = checkbox.get_attribute("aria-checked")
+                if aria_checked == "true":
+                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", checkbox)
+                    time.sleep(0.5)
+                    self.driver.execute_script("arguments[0].click();", checkbox)
+                    print(f"  [OK] Unchecked: {treeview_id_uncheck}")
+                    time.sleep(0.5)
+        except Exception as e:
+            print(f"  [WARNING] Could not uncheck {treeview_id_uncheck}: {e}")
+        
+        # Check the two new checkboxes
+        treeview_ids_check = [
+            "treeview-1012-record-BPK-901-000002",
+            "treeview-1012-record-BPK-901-000003"
+        ]
+        
+        for treeview_id in treeview_ids_check:
+            print(f"  [INFO] Checking: {treeview_id}")
+            try:
+                wait = WebDriverWait(self.driver, 10)
+                treeview_element = wait.until(
+                    EC.presence_of_element_located((By.ID, treeview_id))
+                )
+                
+                # Find checkboxes
+                checkboxes = treeview_element.find_elements(By.XPATH, ".//*[contains(@class, 'x-tree-checkbox') or contains(@class, 'tree-checkbox') or @role='checkbox' or @type='checkbox']")
+                if not checkboxes:
+                    checkboxes = treeview_element.find_elements(By.XPATH, ".//*[@aria-checked]")
+                
+                if checkboxes:
+                    checkbox = checkboxes[0]
+                    aria_checked = checkbox.get_attribute("aria-checked")
+                    if aria_checked != "true":
+                        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", checkbox)
+                        time.sleep(0.5)
+                        self.driver.execute_script("arguments[0].click();", checkbox)
+                        print(f"  [OK] Checked: {treeview_id}")
+                        time.sleep(0.5)
+                    else:
+                        print(f"  [INFO] Already checked: {treeview_id}")
+            except Exception as e:
+                print(f"  [WARNING] Could not check {treeview_id}: {e}")
+        
+        print("  [OK] Checkbox changes completed")
+    
     def _get_city_by_index(self, index: int) -> str:
         """Get city name by index from dropdown ext-gen1064. Returns city name or None if not found."""
         try:
@@ -771,7 +1047,7 @@ class OJKExtJSScraper:
                 self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", valid_cities[index])
                 time.sleep(0.5)
                 self.driver.execute_script("arguments[0].click();", valid_cities[index])
-                time.sleep(2.0)  # Wait longer for PostBack and dropdown to update
+                time.sleep(1.0)  # Wait for PostBack and dropdown to update (reduced by 50%)
                 print(f"    [OK] Selected city: '{city_name}'")
                 return city_name
             else:
@@ -785,6 +1061,61 @@ class OJKExtJSScraper:
                 return None
         except Exception as e:
             print(f"    [ERROR] Could not get city by index {index}: {e}")
+            return None
+    
+    def _get_province_by_index(self, index: int) -> str:
+        """Get province name by index from dropdown ext-gen1059. Returns province name or None if not found."""
+        try:
+            print(f"    [DEBUG] Attempting to get province at index {index}...")
+            # Click dropdown trigger to open
+            dropdown_trigger = self.driver.find_element(By.ID, "ext-gen1059")
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", dropdown_trigger)
+            time.sleep(0.5)
+            self.driver.execute_script("arguments[0].click();", dropdown_trigger)
+            print(f"    [DEBUG] Clicked province dropdown trigger")
+            
+            # Wait for dropdown to appear
+            time.sleep(0.5)
+            wait = WebDriverWait(self.driver, 10)
+            wait.until(EC.presence_of_element_located((By.XPATH, "//ul[contains(@class, 'x-list-plain')]")))
+            print(f"    [DEBUG] Province dropdown appeared")
+            
+            # Get all province options
+            li_elements = self.driver.find_elements(By.XPATH, "//li[@role='option' or contains(@class, 'x-boundlist-item')]")
+            if not li_elements:
+                li_elements = self.driver.find_elements(By.XPATH, "//ul[contains(@class, 'x-list-plain')]//li")
+            
+            print(f"    [DEBUG] Found {len(li_elements)} <li> elements in province dropdown")
+            
+            # Filter out empty elements and get by index
+            valid_provinces = [li for li in li_elements if li.text.strip()]
+            print(f"    [DEBUG] Found {len(valid_provinces)} valid provinces (non-empty)")
+            
+            if valid_provinces:
+                for i, province_li in enumerate(valid_provinces[:5]):  # Print first 5 for debugging
+                    print(f"    [DEBUG] Province {i}: '{province_li.text.strip()[:50]}...'")
+            
+            if index < len(valid_provinces):
+                province_name = valid_provinces[index].text.strip()
+                print(f"    [DEBUG] Selecting province at index {index}: '{province_name}'")
+                # Select it
+                self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", valid_provinces[index])
+                time.sleep(0.5)
+                self.driver.execute_script("arguments[0].click();", valid_provinces[index])
+                time.sleep(1.0)  # Wait for PostBack and dropdown to update
+                print(f"    [OK] Selected province: '{province_name}'")
+                return province_name
+            else:
+                print(f"    [WARNING] Index {index} is out of range. Total valid provinces: {len(valid_provinces)}")
+                # Close dropdown
+                try:
+                    from selenium.webdriver.common.keys import Keys
+                    dropdown_trigger.send_keys(Keys.ESCAPE)
+                except:
+                    pass
+                return None
+        except Exception as e:
+            print(f"    [ERROR] Could not get province by index {index}: {e}")
             import traceback
             traceback.print_exc()
             return None
@@ -802,7 +1133,7 @@ class OJKExtJSScraper:
                 current_city = self._get_city_by_index(city_index)
                 if not current_city:
                     return []
-                time.sleep(3.0)  # Wait longer for banks to load after city selection
+                time.sleep(1.5)  # Wait for banks to load after city selection (reduced by 50%)
             else:
                 time.sleep(1.0)  # Wait a bit longer even if city already selected
             
@@ -886,11 +1217,11 @@ class OJKExtJSScraper:
                 current_city = self._get_city_by_index(city_index)
                 if not current_city:
                     return ""
-                time.sleep(3.0)  # Wait longer for banks to load after city selection
+                time.sleep(1.5)  # Wait for banks to load after city selection (reduced by 50%)
             else:
                 # If this is index 0 (first bank), wait longer to ensure dropdown is ready
                 if bank_index == 0:
-                    time.sleep(2.0)  # Longer wait for first bank after city change
+                    time.sleep(1.0)  # Wait for first bank after city change (reduced by 50%)
                 else:
                     time.sleep(1.0)  # Wait between bank selections
             
@@ -1231,8 +1562,16 @@ class OJKExtJSScraper:
             print(f"  [WARNING] Could not select first bank: {e}")
             return False
     
-    def _click_tampilkan_and_extract_data(self, year: str, city: str, bank: str) -> dict:
-        """Click Tampilkan button, wait for report, and extract data"""
+    def _click_tampilkan_and_extract_data(self, year: str, city: str, bank: str, extract_mode: str = 'sheets_1_3') -> dict:
+        """
+        Click Tampilkan button, wait for report, and extract data
+        
+        Args:
+            year: Selected year
+            city: City name
+            bank: Bank name
+            extract_mode: 'sheets_1_3' to extract ASET/KREDIT/DPK, 'sheets_4_5' to extract LABA KOTOR/RASIO
+        """
         try:
             # Make sure we're on default content and close any open dropdowns
             self.driver.switch_to.default_content()
@@ -1264,7 +1603,7 @@ class OJKExtJSScraper:
             self._wait_for_report_loaded(max_wait=30)
             
             # Extract data - use the provided city and bank names (from dropdown)
-            extracted_data = self._extract_report_data(year, city, bank)
+            extracted_data = self._extract_report_data(year, city, bank, extract_mode=extract_mode)
             return extracted_data
         except Exception as e:
             print(f"  [ERROR] Error in _click_tampilkan_and_extract_data: {e}")
@@ -1272,97 +1611,542 @@ class OJKExtJSScraper:
             traceback.print_exc()
             return None
     
+    def _click_tampilkan_and_extract_laba_kotor(self, year: str, city: str, bank: str) -> dict:
+        """Click Tampilkan button, wait for report, and extract Laba Kotor data"""
+        try:
+            # Make sure we're on default content and close any open dropdowns
+            self.driver.switch_to.default_content()
+            time.sleep(0.3)
+            
+            # Close any open dropdowns by pressing ESC
+            try:
+                from selenium.webdriver.common.keys import Keys
+                body = self.driver.find_element(By.TAG_NAME, "body")
+                body.send_keys(Keys.ESCAPE)
+                time.sleep(0.3)
+            except:
+                pass
+            
+            # Click Tampilkan button
+            tampilkan_button = None
+            try:
+                tampilkan_button = self.driver.find_element(By.ID, "ShowReportButton-btnInnerEl")
+            except:
+                tampilkan_button = self.driver.find_element(By.XPATH, "//span[contains(text(), 'Tampilkan')]")
+            
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", tampilkan_button)
+            time.sleep(0.5)
+            self.driver.execute_script("arguments[0].click();", tampilkan_button)
+            print(f"  [OK] Clicked 'Tampilkan' button")
+            
+            # Wait for report to load
+            print(f"  [INFO] Waiting for report to load...")
+            self._wait_for_report_loaded(max_wait=30)
+            
+            # Extract Laba Kotor data
+            extracted_data = self._extract_laba_kotor_data(year, city, bank)
+            return extracted_data
+        except Exception as e:
+            print(f"  [ERROR] Error in _click_tampilkan_and_extract_laba_kotor: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
     def _initialize_excel(self, year: str):
-        """Initialize Excel workbook and worksheet"""
+        """Initialize data storage (Excel will be created at the end)"""
+        self.all_data = []  # Clear any previous data
+        print(f"  [OK] Data storage initialized")
+    
+    def _append_to_excel(self, data: dict, year: str, city: str, bank: str, is_first_bank_in_city: bool, data_list: str = 'sheets_1_3'):
+        """
+        Store extracted data for later Excel generation
+        
+        Args:
+            data: Extracted data dictionary
+            year: Selected year
+            city: City name
+            bank: Bank name
+            is_first_bank_in_city: Whether this is the first bank in the city
+            data_list: Which data list to use ('sheets_1_3' or 'sheets_4_5')
+        """
+        try:
+            previous_year = str(int(year) - 1)
+            
+            # Store data with all necessary fields
+            record = {
+                'city': city,
+                'bank': bank,
+            }
+            
+            # Add fields that exist in data (for both first 3 sheets and Laba Kotor)
+            if f'Kredit {year}' in data:
+                record[f'Kredit {year}'] = data.get(f'Kredit {year}', 0)
+                record[f'Kredit {previous_year}'] = data.get(f'Kredit {previous_year}', 0)
+            if f'Total Aset {year}' in data:
+                record[f'Total Aset {year}'] = data.get(f'Total Aset {year}', 0)
+                record[f'Total Aset {previous_year}'] = data.get(f'Total Aset {previous_year}', 0)
+            if f'DPK {year}' in data:
+                record[f'DPK {year}'] = data.get(f'DPK {year}', 0)
+                record[f'DPK {previous_year}'] = data.get(f'DPK {previous_year}', 0)
+            if f'Laba Kotor {year}' in data:
+                record[f'Laba Kotor {year}'] = data.get(f'Laba Kotor {year}', 0)
+                record[f'Laba Kotor {previous_year}'] = data.get(f'Laba Kotor {previous_year}', 0)
+            
+            # Add ratio fields (for Sheet 5)
+            ratio_names = ['KPMM', 'PPKA', 'NPL Neto', 'NPL Gross', 'ROA', 'BOPO', 'NIM', 'LDR', 'CR']
+            for ratio_name in ratio_names:
+                if ratio_name in data:
+                    record[ratio_name] = data.get(ratio_name, 0)
+            
+            # Store in the appropriate data list
+            if data_list == 'sheets_1_3':
+                self.sheets_1_3_data.append(record)
+            elif data_list == 'sheets_4_5':
+                self.sheets_4_5_data.append(record)
+            else:
+                # Fallback to all_data for backward compatibility
+                self.all_data.append(record)
+            print(f"  [OK] Stored data for {city} - {bank}")
+        except Exception as e:
+            print(f"  [ERROR] Error storing data: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _get_month_number(self, month_name: str) -> str:
+        """
+        Convert month name to number (e.g., 'Desember' -> '12')
+        
+        Month mapping:
+        - 03 is Maret
+        - 06 is Juni
+        - 09 is September
+        - 12 is Desember
+        """
+        month_map = {
+            'januari': '01', 'februari': '02', 'maret': '03', 'april': '04',
+            'mei': '05', 'juni': '06', 'juli': '07', 'agustus': '08',
+            'september': '09', 'oktober': '10', 'november': '11', 'desember': '12'
+        }
+        return month_map.get(month_name.lower(), '12')
+    
+    def _extract_bank_name(self, bank_full: str) -> str:
+        """Extract bank name by removing prefix numbers and '-' (e.g., '600784-Perumda BPR Tuah Karimun' -> 'Perumda BPR Tuah Karimun')"""
+        if '-' in bank_full:
+            parts = bank_full.split('-', 1)
+            if len(parts) == 2:
+                # Check if first part is all digits
+                if parts[0].strip().isdigit():
+                    return parts[1].strip()
+        return bank_full.strip()
+    
+    def _finalize_excel(self, month: str, year: str):
+        """Create formatted Excel workbook with three sheets (ASET, Kredit, DPK)"""
         if not Workbook:
             print("  [ERROR] openpyxl not installed. Cannot create Excel file.")
             return
         
-        self.excel_wb = Workbook()
-        self.excel_ws = self.excel_wb.active
-        self.excel_ws.title = f"OJK Report {year}"
-        self.excel_row = 1
+        # Use sheets_1_3_data instead of all_data
+        data_to_use = self.sheets_1_3_data if hasattr(self, 'sheets_1_3_data') and self.sheets_1_3_data else self.all_data
         
-        # Set column widths
-        self.excel_ws.column_dimensions['A'].width = 30
-        self.excel_ws.column_dimensions['B'].width = 30
-        self.excel_ws.column_dimensions['C'].width = 20
-        self.excel_ws.column_dimensions['D'].width = 20
-        
-        print(f"  [OK] Excel file initialized")
-    
-    def _append_to_excel(self, data: dict, year: str, city: str, bank: str, is_first_bank_in_city: bool):
-        """Append extracted data to Excel worksheet"""
-        if not self.excel_wb or not self.excel_ws:
-            print("  [ERROR] Excel not initialized")
+        if not data_to_use:
+            print("  [WARNING] No data to export")
             return
         
         try:
-            from openpyxl.styles import Font
+            from openpyxl.styles import Font, Border, Side, Alignment
+            from openpyxl.utils import get_column_letter
             
+            self.excel_wb = Workbook()
+            # Remove default sheet
+            if 'Sheet' in self.excel_wb.sheetnames:
+                self.excel_wb.remove(self.excel_wb['Sheet'])
+            
+            month_num = self._get_month_number(month)
             previous_year = str(int(year) - 1)
+            sheet_name_prefix = f"{month_num}-{year[-2:]}"
             
-            # Add blank row if not first bank in city
-            if not is_first_bank_in_city:
-                self.excel_row += 1
+            # Define border style
+            thin_border = Border(
+                left=Side(style='thin'),
+                right=Side(style='thin'),
+                top=Side(style='thin'),
+                bottom=Side(style='thin')
+            )
             
-            # Row: Kota/Kabupaten
-            self.excel_ws[f'A{self.excel_row}'] = f"Kota/Kabupaten: {city}"
-            self.excel_ws[f'A{self.excel_row}'].font = Font(bold=True)
-            self.excel_row += 1
+            # Create three sheets
+            sheets_data = [
+                ('ASET', 'Total Aset', f'PERINGKAT ASET BPR PERIODE {month_num} {year}'),
+                ('Kredit', 'Kredit', f'PERINGKAT KREDIT BPR PERIODE {month_num} {year}'),
+                ('DPK', 'DPK', f'PERINGKAT DPK BPR PERIODE {month_num} {year}')
+            ]
             
-            # Row: Bank
-            self.excel_ws[f'A{self.excel_row}'] = f"Bank: {bank}"
-            self.excel_ws[f'A{self.excel_row}'].font = Font(bold=True)
-            self.excel_row += 1
+            for sheet_type, data_key, title in sheets_data:
+                ws = self.excel_wb.create_sheet(title=f"{sheet_name_prefix} {sheet_type}")
+                
+                # Title row (row 1)
+                ws.merge_cells(f'A1:F1')
+                title_cell = ws['A1']
+                title_cell.value = title
+                title_cell.font = Font(bold=True, size=14)
+                title_cell.alignment = Alignment(horizontal='center', vertical='center')
+                title_cell.border = thin_border
+                
+                # Header row (row 2)
+                headers = ['No', 'Nama Bank', 'Lokasi', year, previous_year, 'Peningkatan']
+                for col_idx, header in enumerate(headers, start=1):
+                    cell = ws.cell(row=2, column=col_idx)
+                    cell.value = header
+                    cell.font = Font(bold=True)
+                    cell.alignment = Alignment(horizontal='center', vertical='center')
+                    cell.border = thin_border
+                
+                # Data rows
+                row_num = 3
+                for idx, record in enumerate(data_to_use, start=1):
+                    bank_name = self._extract_bank_name(record['bank'])
+                    city = record['city']
+                    
+                    # Get values for this sheet type
+                    current_value = record.get(f'{data_key} {year}', 0)
+                    previous_value = record.get(f'{data_key} {previous_year}', 0)
+                    
+                    # Calculate Peningkatan (percentage increase)
+                    # Use ABS() for denominator so if both values are negative, result stays negative
+                    if previous_value and previous_value != 0:
+                        peningkatan = ((current_value - previous_value) / abs(previous_value)) * 100
+                    else:
+                        peningkatan = 0 if current_value == 0 else 100
+                    
+                    # Write data
+                    ws.cell(row=row_num, column=1).value = idx  # No
+                    ws.cell(row=row_num, column=2).value = bank_name  # Nama Bank
+                    ws.cell(row=row_num, column=3).value = city  # Lokasi
+                    ws.cell(row=row_num, column=4).value = current_value  # Current year
+                    ws.cell(row=row_num, column=5).value = previous_value  # Previous year
+                    ws.cell(row=row_num, column=6).value = peningkatan / 100  # Peningkatan as decimal (Excel percentage format)
+                    
+                    # Apply formatting to all cells in this row
+                    for col_idx in range(1, 7):
+                        cell = ws.cell(row=row_num, column=col_idx)
+                        cell.border = thin_border
+                        if col_idx == 1:  # No column - center aligned
+                            cell.alignment = Alignment(horizontal='center', vertical='center')
+                        elif col_idx == 6:  # Peningkatan - percentage format
+                            cell.number_format = '0.00%'
+                            cell.alignment = Alignment(horizontal='right', vertical='center')
+                        elif col_idx in [4, 5]:  # Year columns - number format with thousand separator
+                            cell.number_format = '#,##0'
+                            cell.alignment = Alignment(horizontal='right', vertical='center')
+                        else:  # Text columns
+                            cell.alignment = Alignment(horizontal='left', vertical='center')
+                    
+                    row_num += 1
+                
+                # Set column widths
+                ws.column_dimensions['A'].width = 6   # No
+                ws.column_dimensions['B'].width = 50  # Nama Bank
+                ws.column_dimensions['C'].width = 30  # Lokasi
+                ws.column_dimensions['D'].width = 18  # Current year
+                ws.column_dimensions['E'].width = 18  # Previous year
+                ws.column_dimensions['F'].width = 15  # Peningkatan
+                
+                # Set row heights
+                ws.row_dimensions[1].height = 25  # Title row
+                ws.row_dimensions[2].height = 20  # Header row
             
-            # Row: Kredit
-            kredit_current = data.get(f'Kredit {year}', 0)
-            kredit_previous = data.get(f'Kredit {previous_year}', 0)
-            self.excel_ws[f'A{self.excel_row}'] = f"Kredit {year}:"
-            self.excel_ws[f'B{self.excel_row}'] = f"{kredit_current:,.0f}".replace(',', '.') if isinstance(kredit_current, (int, float)) else str(kredit_current)
-            self.excel_ws[f'C{self.excel_row}'] = f"Kredit {previous_year}:"
-            self.excel_ws[f'D{self.excel_row}'] = f"{kredit_previous:,.0f}".replace(',', '.') if isinstance(kredit_previous, (int, float)) else str(kredit_previous)
-            self.excel_row += 1
-            
-            # Row: Total Aset
-            total_aset_current = data.get(f'Total Aset {year}', 0)
-            total_aset_previous = data.get(f'Total Aset {previous_year}', 0)
-            self.excel_ws[f'A{self.excel_row}'] = f"Total Aset {year}:"
-            self.excel_ws[f'B{self.excel_row}'] = f"{total_aset_current:,.0f}".replace(',', '.') if isinstance(total_aset_current, (int, float)) else str(total_aset_current)
-            self.excel_ws[f'C{self.excel_row}'] = f"Total Aset {previous_year}:"
-            self.excel_ws[f'D{self.excel_row}'] = f"{total_aset_previous:,.0f}".replace(',', '.') if isinstance(total_aset_previous, (int, float)) else str(total_aset_previous)
-            self.excel_row += 1
-            
-            # Row: DPK
-            dpk_current = data.get(f'DPK {year}', 0)
-            dpk_previous = data.get(f'DPK {previous_year}', 0)
-            self.excel_ws[f'A{self.excel_row}'] = f"DPK {year}:"
-            self.excel_ws[f'B{self.excel_row}'] = f"{dpk_current:,.0f}".replace(',', '.') if isinstance(dpk_current, (int, float)) else str(dpk_current)
-            self.excel_ws[f'C{self.excel_row}'] = f"DPK {previous_year}:"
-            self.excel_ws[f'D{self.excel_row}'] = f"{dpk_previous:,.0f}".replace(',', '.') if isinstance(dpk_previous, (int, float)) else str(dpk_previous)
-            self.excel_row += 1
-            
-            print(f"  [OK] Appended data to Excel (row {self.excel_row - 1})")
-        except Exception as e:
-            print(f"  [ERROR] Error appending to Excel: {e}")
-            import traceback
-            traceback.print_exc()
-    
-    def _finalize_excel(self, year: str):
-        """Save and close Excel workbook"""
-        if not self.excel_wb:
-            print("  [ERROR] Excel not initialized")
-            return
-        
-        try:
-            filename = f"OJK_Report_{year}.xlsx"
+            # Save file
+            filename = "Perbandingan_Laporan_Publikasi_BPR.xlsx"
             filepath = self.output_dir / filename
             self.excel_wb.save(filepath)
             print(f"  [OK] Excel file saved to {filepath}")
-            print(f"  [OK] Total rows written: {self.excel_row - 1}")
+            print(f"  [OK] Total records: {len(data_to_use)}")
+            print(f"  [OK] Created 3 sheets: {sheet_name_prefix} ASET, {sheet_name_prefix} Kredit, {sheet_name_prefix} DPK")
         except Exception as e:
-            print(f"  [ERROR] Error saving Excel file: {e}")
+            print(f"  [ERROR] Error creating Excel file: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _finalize_excel_laba_kotor(self, month: str, year: str):
+        """Add Sheet 4 (Laba Kotor) to existing Excel workbook"""
+        if not Workbook:
+            print("  [ERROR] openpyxl not installed. Cannot add Laba Kotor sheet.")
+            return
+        
+        # Use sheets_4_5_data instead of all_data
+        data_to_use = self.sheets_4_5_data if hasattr(self, 'sheets_4_5_data') and self.sheets_4_5_data else self.all_data
+        
+        if not data_to_use:
+            print("  [WARNING] No Laba Kotor data to export")
+            return
+        
+        try:
+            from openpyxl.styles import Font, Border, Side, Alignment
+            from openpyxl import load_workbook
+            
+            filename = "Perbandingan_Laporan_Publikasi_BPR.xlsx"
+            filepath = self.output_dir / filename
+            
+            # Load existing workbook (should exist from Sheets 1-3)
+            if not filepath.exists():
+                print(f"  [ERROR] Excel file not found: {filepath}")
+                print(f"  [ERROR] Sheets 1-3 should have been created first!")
+                return
+            
+            self.excel_wb = load_workbook(filepath)
+            
+            month_num = self._get_month_number(month)
+            previous_year = str(int(year) - 1)
+            sheet_name_prefix = f"{month_num}-{year[-2:]}"
+            
+            # Define border style
+            thin_border = Border(
+                left=Side(style='thin'),
+                right=Side(style='thin'),
+                top=Side(style='thin'),
+                bottom=Side(style='thin')
+            )
+            
+            # Create Sheet 4: Laba Kotor
+            ws = self.excel_wb.create_sheet(title=f"{sheet_name_prefix} Laba Kotor")
+            
+            # Remove default sheet only after we've created the new sheet (to avoid corrupt file)
+            if 'Sheet' in self.excel_wb.sheetnames:
+                self.excel_wb.remove(self.excel_wb['Sheet'])
+            title = f'PERINGKAT LABA KOTOR BPR PERIODE {month_num} {year}'
+            
+            # Title row (row 1)
+            ws.merge_cells(f'A1:F1')
+            title_cell = ws['A1']
+            title_cell.value = title
+            title_cell.font = Font(bold=True, size=14)
+            title_cell.alignment = Alignment(horizontal='center', vertical='center')
+            title_cell.border = thin_border
+            
+            # Header row (row 2)
+            headers = ['No', 'Nama Bank', 'Lokasi', year, previous_year, 'Peningkatan']
+            for col_idx, header in enumerate(headers, start=1):
+                cell = ws.cell(row=2, column=col_idx)
+                cell.value = header
+                cell.font = Font(bold=True)
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+                cell.border = thin_border
+            
+            # Data rows
+            row_num = 3
+            # Filter records that have Laba Kotor data
+            laba_kotor_records = [r for r in data_to_use if f'Laba Kotor {year}' in r or 'Laba Kotor' in str(r)]
+            if not laba_kotor_records:
+                # If no Laba Kotor data, use all records (they might have 0 values)
+                laba_kotor_records = data_to_use
+                print(f"  [INFO] No Laba Kotor fields found, using all {len(laba_kotor_records)} records (may have 0 values)")
+            
+            for idx, record in enumerate(laba_kotor_records, start=1):
+                bank_name = self._extract_bank_name(record['bank'])
+                city = record['city']
+                
+                # Get Laba Kotor values
+                current_value = record.get(f'Laba Kotor {year}', 0)
+                previous_value = record.get(f'Laba Kotor {previous_year}', 0)
+                
+                # Calculate Peningkatan (percentage increase)
+                # Use ABS() for denominator so if both values are negative, result stays negative
+                if previous_value and previous_value != 0:
+                    peningkatan = ((current_value - previous_value) / abs(previous_value)) * 100
+                else:
+                    peningkatan = 0 if current_value == 0 else 100
+                
+                # Write data
+                ws.cell(row=row_num, column=1).value = idx  # No
+                ws.cell(row=row_num, column=2).value = bank_name  # Nama Bank
+                ws.cell(row=row_num, column=3).value = city  # Lokasi
+                ws.cell(row=row_num, column=4).value = current_value  # Current year
+                ws.cell(row=row_num, column=5).value = previous_value  # Previous year
+                ws.cell(row=row_num, column=6).value = peningkatan / 100  # Peningkatan as decimal
+                
+                # Apply formatting
+                for col_idx in range(1, 7):
+                    cell = ws.cell(row=row_num, column=col_idx)
+                    cell.border = thin_border
+                    if col_idx == 1:  # No column
+                        cell.alignment = Alignment(horizontal='center', vertical='center')
+                    elif col_idx == 6:  # Peningkatan - percentage format
+                        cell.number_format = '0.00%'
+                        cell.alignment = Alignment(horizontal='right', vertical='center')
+                    elif col_idx in [4, 5]:  # Year columns
+                        cell.number_format = '#,##0'
+                        cell.alignment = Alignment(horizontal='right', vertical='center')
+                    else:  # Text columns
+                        cell.alignment = Alignment(horizontal='left', vertical='center')
+                
+                row_num += 1
+            
+            # Set column widths
+            ws.column_dimensions['A'].width = 6   # No
+            ws.column_dimensions['B'].width = 50  # Nama Bank
+            ws.column_dimensions['C'].width = 30  # Lokasi
+            ws.column_dimensions['D'].width = 18  # Current year
+            ws.column_dimensions['E'].width = 18  # Previous year
+            ws.column_dimensions['F'].width = 15  # Peningkatan
+            
+            # Set row heights
+            ws.row_dimensions[1].height = 25  # Title row
+            ws.row_dimensions[2].height = 20  # Header row
+            
+            # Save file
+            self.excel_wb.save(filepath)
+            print(f"  [OK] Added Sheet 4: {sheet_name_prefix} Laba Kotor")
+            print(f"  [OK] Total Laba Kotor records: {len(laba_kotor_records)}")
+            print(f"  [OK] Excel file saved to: {filepath}")
+        except Exception as e:
+            print(f"  [ERROR] Error adding Laba Kotor sheet: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _finalize_excel_rasio(self, month: str, year: str):
+        """Add Sheet 5 (Rasio) to existing Excel workbook with 9 separate tables"""
+        if not Workbook:
+            print("  [ERROR] openpyxl not installed. Cannot add Rasio sheet.")
+            return
+        
+        # Use sheets_4_5_data instead of all_data
+        data_to_use = self.sheets_4_5_data if hasattr(self, 'sheets_4_5_data') and self.sheets_4_5_data else self.all_data
+        
+        if not data_to_use:
+            print("  [WARNING] No Rasio data to export")
+            # Still try to create sheet if workbook exists
+            try:
+                filename = "Perbandingan_Laporan_Publikasi_BPR.xlsx"
+                filepath = self.output_dir / filename
+                if filepath.exists():
+                    from openpyxl import load_workbook
+                    self.excel_wb = load_workbook(filepath)
+                    self.excel_wb.save(filepath)
+                    print(f"  [INFO] Excel file saved (no Rasio data): {filepath}")
+            except:
+                pass
+            return
+        
+        try:
+            from openpyxl.styles import Font, Border, Side, Alignment
+            from openpyxl import load_workbook
+            
+            filename = "Perbandingan_Laporan_Publikasi_BPR.xlsx"
+            filepath = self.output_dir / filename
+            
+            if not filepath.exists():
+                print(f"  [ERROR] Excel file not found: {filepath}")
+                return
+            
+            self.excel_wb = load_workbook(filepath)
+            
+            month_num = self._get_month_number(month)
+            sheet_name_prefix = f"{month_num}-{year[-2:]}"
+            
+            # Define border style
+            thin_border = Border(
+                left=Side(style='thin'),
+                right=Side(style='thin'),
+                top=Side(style='thin'),
+                bottom=Side(style='thin')
+            )
+            
+            # Create Sheet 5: Rasio
+            ws = self.excel_wb.create_sheet(title=f"{sheet_name_prefix} Rasio")
+            title = f'PERINGKAT RASIO BPR PERIODE {month_num} {year}'
+            
+            # Title row (row 1) - merged across all columns
+            ws.merge_cells(f'A1:D1')
+            title_cell = ws['A1']
+            title_cell.value = title
+            title_cell.font = Font(bold=True, size=14)
+            title_cell.alignment = Alignment(horizontal='center', vertical='center')
+            title_cell.border = thin_border
+            
+            # Define 9 ratios with their column names
+            ratios = [
+                ('KPMM', 'KPMM'),
+                ('PPKA', 'PPKA'),
+                ('NPL Neto', 'NPL Neto'),
+                ('NPL Gross', 'NPL Gross'),
+                ('ROA', 'ROA'),
+                ('BOPO', 'BOPO'),
+                ('NIM', 'NIM'),
+                ('LDR', 'LDR'),
+                ('CR', 'CR')
+            ]
+            
+            # Starting row for each table
+            current_row = 3  # Start after title (row 1) and empty row (row 2)
+            
+            for ratio_key, ratio_name in ratios:
+                # Filter data that has this ratio
+                ratio_data = [r for r in data_to_use if ratio_key in r and r.get(ratio_key) is not None]
+                
+                if not ratio_data:
+                    # Skip if no data for this ratio
+                    current_row += 50  # Reserve space for next table
+                    continue
+                
+                # Sort by ratio value (descending)
+                ratio_data.sort(key=lambda x: x.get(ratio_key, 0), reverse=True)
+                
+                # Table header (row current_row)
+                headers = ['No', 'Nama Bank', 'Lokasi', ratio_name]
+                for col_idx, header in enumerate(headers, start=1):
+                    cell = ws.cell(row=current_row, column=col_idx)
+                    cell.value = header
+                    cell.font = Font(bold=True)
+                    cell.alignment = Alignment(horizontal='center', vertical='center')
+                    cell.border = thin_border
+                
+                # Data rows
+                data_start_row = current_row + 1
+                for idx, record in enumerate(ratio_data, start=1):
+                    row_num = data_start_row + idx - 1
+                    bank_name = self._extract_bank_name(record['bank'])
+                    city = record['city']
+                    ratio_value = record.get(ratio_key, 0)
+                    
+                    # Write data
+                    ws.cell(row=row_num, column=1).value = idx  # No
+                    ws.cell(row=row_num, column=2).value = bank_name  # Nama Bank
+                    ws.cell(row=row_num, column=3).value = city  # Lokasi
+                    ws.cell(row=row_num, column=4).value = ratio_value  # Ratio value
+                    
+                    # Apply formatting
+                    for col_idx in range(1, 5):
+                        cell = ws.cell(row=row_num, column=col_idx)
+                        cell.border = thin_border
+                        if col_idx == 1:  # No column
+                            cell.alignment = Alignment(horizontal='center', vertical='center')
+                        elif col_idx == 4:  # Ratio value - number format with 2 decimals
+                            cell.number_format = '0.00'
+                            cell.alignment = Alignment(horizontal='right', vertical='center')
+                        else:  # Text columns
+                            cell.alignment = Alignment(horizontal='left', vertical='center')
+                
+                # Move to next table (leave 2 rows gap between tables)
+                # Table ends at row (data_start_row + len(ratio_data) - 1)
+                # Next table starts at row (data_start_row + len(ratio_data) + 2)
+                current_row = data_start_row + len(ratio_data) + 2
+            
+            # Set column widths
+            ws.column_dimensions['A'].width = 6   # No
+            ws.column_dimensions['B'].width = 50  # Nama Bank
+            ws.column_dimensions['C'].width = 30  # Lokasi
+            ws.column_dimensions['D'].width = 15  # Ratio value
+            
+            # Set row heights
+            ws.row_dimensions[1].height = 25  # Title row
+            
+            # Save file
+            self.excel_wb.save(filepath)
+            print(f"  [OK] Added Sheet 5: {sheet_name_prefix} Rasio")
+            print(f"  [OK] Total Rasio records: {len(data_to_use)}")
+            print(f"  [OK] Created 9 tables for ratios: KPMM, PPKA, NPL Neto, NPL Gross, ROA, BOPO, NIM, LDR, CR")
+            print(f"  [OK] Excel file saved to: {filepath}")
+        except Exception as e:
+            print(f"  [ERROR] Error adding Rasio sheet: {e}")
             import traceback
             traceback.print_exc()
     
@@ -1413,6 +2197,7 @@ class OJKExtJSScraper:
             "DPK", 
             "Total Aset",
             "Laba Kotor",
+            "LABA (RUGI) TAHUN BERJALAN SEBELUM PAJAK PENGHASILAN",
             "Rasio"
         ]
         
@@ -1449,7 +2234,7 @@ class OJKExtJSScraper:
         print(f"    [DEBUG] Wait completed. Found identifiers: {found_identifiers}")
         return True
     
-    def _extract_report_data(self, selected_year: str, city: str = None, bank: str = None) -> dict:
+    def _extract_report_data(self, selected_year: str, city: str = None, bank: str = None, extract_mode: str = 'sheets_1_3') -> dict:
         """
         Extract financial data from the generated report
         
@@ -1457,6 +2242,7 @@ class OJKExtJSScraper:
             selected_year: The selected year (e.g., "2024")
             city: The selected city (optional, will try to extract from page if not provided)
             bank: The selected bank (optional, will try to extract from page if not provided)
+            extract_mode: 'sheets_1_3' to extract ASET/KREDIT/DPK, 'sheets_4_5' to extract LABA KOTOR/RASIO only
             
         Returns:
             Dictionary with extracted data
@@ -1473,7 +2259,8 @@ class OJKExtJSScraper:
                 try:
                     self.driver.switch_to.frame(iframe)
                     iframe_source = self.driver.page_source
-                    if "Kredit" in iframe_source or "Aset" in iframe_source or "DPK" in iframe_source:
+                    if ("Kredit" in iframe_source or "Aset" in iframe_source or "DPK" in iframe_source or
+                        "LABA" in iframe_source or "Rasio" in iframe_source or "KPMM" in iframe_source):
                         print("    [DEBUG] Found report content in iframe")
                         page_source = iframe_source
                         report_iframe = iframe  # Keep reference to the iframe
@@ -1492,6 +2279,7 @@ class OJKExtJSScraper:
             # else: Stay in iframe context - don't switch back yet
             
             # Identifiers to check for (at least one should be present for validation)
+            # Include both Sheets 1-3 identifiers and Sheets 4-5 identifiers
             identifiers_to_check = [
                 "Kepada BPR",
                 "Kepada Bank Umum",
@@ -1499,7 +2287,11 @@ class OJKExtJSScraper:
                 "pihak tidak terkait",
                 "Total Aset",
                 "Tabungan",
-                "Deposito"
+                "Deposito",
+                "LABA (RUGI) TAHUN BERJALAN SEBELUM PAJAK PENGHASILAN",
+                "Kewajiban Penyediaan Modal Minimum",
+                "Rasio Cadangan terhadap PPKA",
+                "Non Performing Loan"
             ]
             
             def check_identifiers_in_soup(soup: BeautifulSoup, identifiers: list) -> tuple[bool, str]:
@@ -1570,7 +2362,8 @@ class OJKExtJSScraper:
                             try:
                                 self.driver.switch_to.frame(iframe)
                                 iframe_source = self.driver.page_source
-                                if "Kredit" in iframe_source or "Aset" in iframe_source or "DPK" in iframe_source:
+                                if ("Kredit" in iframe_source or "Aset" in iframe_source or "DPK" in iframe_source or
+                                    "LABA" in iframe_source or "Rasio" in iframe_source or "KPMM" in iframe_source):
                                     return iframe_source, iframe
                                 self.driver.switch_to.default_content()
                             except:
@@ -1585,10 +2378,16 @@ class OJKExtJSScraper:
                     return self.driver.page_source, None
             
             # Validation: Wait for page to fully load by checking if records are found by identifiers
-            print("    [INFO] Memvalidasi halaman telah dimuat sepenuhnya (memeriksa identifier setiap 10 detik)...")
-            max_wait_attempts = 20  # Maximum 20 attempts = 200 seconds (20 * 10s = 200s)
-            wait_interval = 10  # Wait 10 seconds between checks
-            page_fully_loaded = False
+            # For sheets_4_5, use longer wait times since 2 files are being opened
+            if extract_mode == 'sheets_4_5':
+                print("    [INFO] Memvalidasi halaman telah dimuat sepenuhnya (memeriksa identifier setiap 12 detik untuk Sheets 4-5)...")
+                max_wait_attempts = 30  # Maximum 20 attempts = 240 seconds (20 * 12s = 240s)
+                wait_interval = 12  # Wait 12 seconds between checks (for 2 files)
+            else:
+                print("    [INFO] Memvalidasi halaman telah dimuat sepenuhnya (memeriksa identifier setiap 10 detik)...")
+                max_wait_attempts = 30  # Maximum 20 attempts = 200 seconds (20 * 10s = 200s)
+                wait_interval = 10  # Wait 10 seconds between checks
+            page_fully_loaded = False   
             soup = None
             
             for attempt in range(max_wait_attempts):
@@ -1905,91 +2704,357 @@ class OJKExtJSScraper:
             result['city'] = extracted_city if extracted_city else "N/A"
             result['bank'] = extracted_bank if extracted_bank else "N/A"
             
-            # Extract Kredit data only - Sum of 4 identifiers
-            print("    [INFO] Extracting Kredit data...")
-            # Only extract: Kepada BPR, Kepada Bank Umum, pihak terkait (first occurrence), pihak tidak terkait (first occurrence)
-            kredit_identifiers = [
-                "Kepada BPR",
-                "Kepada Bank Umum",
-                "pihak terkait",
-                "pihak tidak terkait"
-            ]
-            kredit_selected_year = 0
-            kredit_previous_year = 0
-            found_identifiers = set()  # Track which identifiers were found
-            
-            for identifier in kredit_identifiers:
-                values = find_and_extract(identifier)
-                if len(values) >= 2:
-                    # Check if we already found this identifier (avoid duplicates - only take first occurrence)
-                    identifier_key = identifier.strip().lower()
-                    if identifier_key not in found_identifiers:
-                        # First div = current year, second div = previous year
-                        kredit_selected_year += values[0]  # First div (current year)
-                        kredit_previous_year += values[1]  # Second div (previous year)
-                        found_identifiers.add(identifier_key)
-                        print(f"    [DEBUG] Added Kredit from '{identifier}': {values[0]} (2024) + {values[1]} (2023)")
-                elif len(values) == 1:
-                    identifier_key = identifier.strip().lower()
-                    if identifier_key not in found_identifiers:
-                        kredit_selected_year += values[0]  # Only current year available
-                        found_identifiers.add(identifier_key)
-                        print(f"    [DEBUG] Added Kredit from '{identifier}': {values[0]} (2024 only)")
-            
-            result[f'Kredit {selected_year}'] = kredit_selected_year
-            result[f'Kredit {previous_year}'] = kredit_previous_year
-            
-            print(f"    [OK] Extracted Kredit data: {selected_year}={kredit_selected_year}, {previous_year}={kredit_previous_year}")
-            
-            # Extract Total Aset data - only one div per year (no sum needed)
-            print("    [INFO] Extracting Total Aset data...")
-            total_aset_identifier = "Total Aset"
-            total_aset_values = find_and_extract(total_aset_identifier)
-            
-            if len(total_aset_values) >= 2:
-                result[f'Total Aset {selected_year}'] = total_aset_values[0]
-                result[f'Total Aset {previous_year}'] = total_aset_values[1]
-                print(f"    [OK] Extracted Total Aset data: {selected_year}={total_aset_values[0]}, {previous_year}={total_aset_values[1]}")
-            elif len(total_aset_values) == 1:
-                result[f'Total Aset {selected_year}'] = total_aset_values[0]
-                result[f'Total Aset {previous_year}'] = 0
-                print(f"    [OK] Extracted Total Aset data: {selected_year}={total_aset_values[0]}, {previous_year}=0 (only current year found)")
+            # Only extract ASET/KREDIT/DPK if in sheets_1_3 mode
+            if extract_mode == 'sheets_1_3':
+                # Extract Kredit data only - Sum of 4 identifiers
+                print("    [INFO] Extracting Kredit data...")
+                # Only extract: Kepada BPR, Kepada Bank Umum, pihak terkait (first occurrence), pihak tidak terkait (first occurrence)
+                kredit_identifiers = [
+                    "Kepada BPR",
+                    "Kepada Bank Umum",
+                    "pihak terkait",
+                    "pihak tidak terkait"
+                ]
+                kredit_selected_year = 0
+                kredit_previous_year = 0
+                found_identifiers = set()  # Track which identifiers were found
+                
+                for identifier in kredit_identifiers:
+                    values = find_and_extract(identifier)
+                    if len(values) >= 2:
+                        # Check if we already found this identifier (avoid duplicates - only take first occurrence)
+                        identifier_key = identifier.strip().lower()
+                        if identifier_key not in found_identifiers:
+                            # First div = current year, second div = previous year
+                            kredit_selected_year += values[0]  # First div (current year)
+                            kredit_previous_year += values[1]  # Second div (previous year)
+                            found_identifiers.add(identifier_key)
+                            print(f"    [DEBUG] Added Kredit from '{identifier}': {values[0]} (2024) + {values[1]} (2023)")
+                    elif len(values) == 1:
+                        identifier_key = identifier.strip().lower()
+                        if identifier_key not in found_identifiers:
+                            kredit_selected_year += values[0]  # Only current year available
+                            found_identifiers.add(identifier_key)
+                            print(f"    [DEBUG] Added Kredit from '{identifier}': {values[0]} (2024 only)")
+                
+                result[f'Kredit {selected_year}'] = kredit_selected_year
+                result[f'Kredit {previous_year}'] = kredit_previous_year
+                
+                print(f"    [OK] Extracted Kredit data: {selected_year}={kredit_selected_year}, {previous_year}={kredit_previous_year}")
+                
+                # Extract Total Aset data - only one div per year (no sum needed)
+                print("    [INFO] Extracting Total Aset data...")
+                total_aset_identifier = "Total Aset"
+                total_aset_values = find_and_extract(total_aset_identifier)
+                
+                if len(total_aset_values) >= 2:
+                    result[f'Total Aset {selected_year}'] = total_aset_values[0]
+                    result[f'Total Aset {previous_year}'] = total_aset_values[1]
+                    print(f"    [OK] Extracted Total Aset data: {selected_year}={total_aset_values[0]}, {previous_year}={total_aset_values[1]}")
+                elif len(total_aset_values) == 1:
+                    result[f'Total Aset {selected_year}'] = total_aset_values[0]
+                    result[f'Total Aset {previous_year}'] = 0
+                    print(f"    [OK] Extracted Total Aset data: {selected_year}={total_aset_values[0]}, {previous_year}=0 (only current year found)")
+                else:
+                    result[f'Total Aset {selected_year}'] = 0
+                    result[f'Total Aset {previous_year}'] = 0
+                    print(f"    [WARNING] Total Aset data not found")
+                
+                # Extract DPK data - Sum of Tabungan, Deposito, and Simpanan dari Bank Lain for each year
+                print("    [INFO] Extracting DPK data (Tabungan + Deposito + Simpanan dari Bank Lain)...")
+                dpk_identifiers = [
+                    "Tabungan",
+                    "Deposito",
+                    "Simpanan dari Bank Lain"
+                ]
+                dpk_selected_year = 0
+                dpk_previous_year = 0
+                found_dpk_identifiers = set()
+                
+                for identifier in dpk_identifiers:
+                    values = find_and_extract(identifier)
+                    if len(values) >= 2:
+                        identifier_key = identifier.strip().lower()
+                        if identifier_key not in found_dpk_identifiers:
+                            dpk_selected_year += values[0]  # First div (current year)
+                            dpk_previous_year += values[1]  # Second div (previous year)
+                            found_dpk_identifiers.add(identifier_key)
+                            print(f"    [DEBUG] Added DPK from '{identifier}': {values[0]} (2024) + {values[1]} (2023)")
+                    elif len(values) == 1:
+                        identifier_key = identifier.strip().lower()
+                        if identifier_key not in found_dpk_identifiers:
+                            dpk_selected_year += values[0]  # Only current year available
+                            found_dpk_identifiers.add(identifier_key)
+                            print(f"    [DEBUG] Added DPK from '{identifier}': {values[0]} (2024 only)")
+                
+                result[f'DPK {selected_year}'] = dpk_selected_year
+                result[f'DPK {previous_year}'] = dpk_previous_year
+                
+                print(f"    [OK] Extracted DPK data: {selected_year}={dpk_selected_year}, {previous_year}={dpk_previous_year}")
+                
+                # In sheets_1_3 mode, explicitly set Laba Kotor and Rasio to 0 (not extracted)
+                result[f'Laba Kotor {selected_year}'] = 0
+                result[f'Laba Kotor {previous_year}'] = 0
+                ratio_names = ['KPMM', 'PPKA', 'NPL Neto', 'NPL Gross', 'ROA', 'BOPO', 'NIM', 'LDR', 'CR']
+                for ratio_name in ratio_names:
+                    result[ratio_name] = 0
+                print("    [INFO] Skipping Laba Kotor/Rasio extraction (sheets_1_3 mode - only extracting ASET/KREDIT/DPK)")
             else:
+                # In sheets_4_5 mode, skip ASET/KREDIT/DPK extraction
+                print("    [INFO] Skipping ASET/KREDIT/DPK extraction (sheets_4_5 mode)")
+                result[f'Kredit {selected_year}'] = 0
+                result[f'Kredit {previous_year}'] = 0
                 result[f'Total Aset {selected_year}'] = 0
                 result[f'Total Aset {previous_year}'] = 0
-                print(f"    [WARNING] Total Aset data not found")
+                result[f'DPK {selected_year}'] = 0
+                result[f'DPK {previous_year}'] = 0
             
-            # Extract DPK data - Sum of Tabungan, Deposito, and Simpanan dari Bank Lain for each year
-            print("    [INFO] Extracting DPK data (Tabungan + Deposito + Simpanan dari Bank Lain)...")
-            dpk_identifiers = [
-                "Tabungan",
-                "Deposito",
-                "Simpanan dari Bank Lain"
-            ]
-            dpk_selected_year = 0
-            dpk_previous_year = 0
-            found_dpk_identifiers = set()
+            # Extract Laba Kotor and Ratios (for Sheets 4-5) - only if in sheets_4_5 mode
+            if extract_mode == 'sheets_4_5':
+                # Check if Laba Kotor/Rasio identifiers exist in the page
+                laba_kotor_identifier = "LABA (RUGI) TAHUN BERJALAN SEBELUM PAJAK PENGHASILAN"
+                ratio_identifiers_check = [
+                    "Kewajiban Penyediaan Modal Minimum",
+                    "Rasio Cadangan terhadap PPKA",
+                    "Non Performing Loan"
+                ]
+                
+                # Check if any ratio identifiers exist
+                has_ratio_data = False
+                for div in soup.find_all('div'):
+                    text = div.get_text(strip=True)
+                    if laba_kotor_identifier.upper() in text.upper() or any(rid.upper() in text.upper() for rid in ratio_identifiers_check):
+                        has_ratio_data = True
+                        break
+                
+                if has_ratio_data:
+                    print("    [INFO] Detected Laba Kotor/Rasio data in report, extracting...")
+                    
+                    def extract_laba_kotor_value(identifier_text: str) -> tuple[float, float]:
+                        """
+                        Extract Laba Kotor value from table structure.
+                        Structure: identifier in <td><div>, values in subsequent <td><div> elements.
+                        Values can be negative in parentheses like (677,555,231).
+                        Returns tuple of (current_year_value, previous_year_value)
+                        """
+                        import re
+                        
+                        for div in soup.find_all('div'):
+                            text = div.get_text(strip=True)
+                            if identifier_text.upper() in text.upper() and len(text) < 5000:
+                                # Find the parent <td> or <tr> (table row)
+                                parent_td = div.find_parent('td')
+                                if not parent_td:
+                                    continue
+                                
+                                # Find the parent <tr> (table row) to get all <td> elements in the row
+                                parent_tr = parent_td.find_parent('tr')
+                                if not parent_tr:
+                                    # If no <tr>, try to find subsequent <td> elements from the same parent
+                                    parent_td_siblings = parent_td.find_next_siblings('td')
+                                    if not parent_td_siblings:
+                                        continue
+                                    tds = [parent_td] + list(parent_td_siblings)
+                                else:
+                                    # Get all <td> elements in the row
+                                    tds = parent_tr.find_all('td')
+                                
+                                # Find the index of the identifier <td>
+                                try:
+                                    identifier_td_index = tds.index(parent_td)
+                                except:
+                                    continue
+                                
+                                # Extract values from subsequent <td> elements (skip the identifier <td>)
+                                # Look for numeric values in <td> elements (may have multiple <td> elements to check)
+                                values = []
+                                import re
+                                for td in tds[identifier_td_index + 1:identifier_td_index + 10]:  # Check more <td> elements to find numeric values
+                                    # Look for <div> inside the <td>
+                                    td_div = td.find('div')
+                                    if td_div:
+                                        td_text = td_div.get_text(strip=True)
+                                        if td_text:
+                                            # Check if this looks like a number (contains digits, possibly with parentheses and commas)
+                                            # Pattern: optional parentheses, digits with commas, optional decimal part
+                                            # Examples: "(677,555,231)", "1,223", "123.45"
+                                            numeric_pattern = r'^\(?[\d,]+\.?\d*\)?$'
+                                            if re.match(numeric_pattern, td_text.replace(' ', '')):
+                                                values.append(td_text)
+                                                if len(values) >= 2:  # Stop after finding 2 numeric values
+                                                    break
+                                
+                                # Parse the values
+                                if len(values) >= 2:
+                                    # Two values: first is previous year, second is current year
+                                    try:
+                                        # Parse first value (previous year)
+                                        val1_text = values[0].strip()
+                                        is_negative1 = val1_text.startswith('(') and val1_text.endswith(')')
+                                        if is_negative1:
+                                            val1_text = val1_text[1:-1].strip()  # Remove parentheses
+                                        # Remove commas (thousands separators) and convert to float
+                                        val1_text = val1_text.replace(',', '')
+                                        val1 = float(val1_text)
+                                        if is_negative1:
+                                            val1 = -val1
+                                        
+                                        # Parse second value (current year)
+                                        val2_text = values[1].strip()
+                                        is_negative2 = val2_text.startswith('(') and val2_text.endswith(')')
+                                        if is_negative2:
+                                            val2_text = val2_text[1:-1].strip()  # Remove parentheses
+                                        # Remove commas (thousands separators) and convert to float
+                                        val2_text = val2_text.replace(',', '')
+                                        val2 = float(val2_text)
+                                        if is_negative2:
+                                            val2 = -val2
+                                        
+                                        # Return as (current_year, previous_year)
+                                        return (val2, val1)
+                                    except Exception as e:
+                                        print(f"    [DEBUG] Error parsing two values: {e}, values: {values}")
+                                        pass
+                                elif len(values) == 1:
+                                    # Single value: use for both years
+                                    try:
+                                        val_text = values[0].strip()
+                                        is_negative = val_text.startswith('(') and val_text.endswith(')')
+                                        if is_negative:
+                                            val_text = val_text[1:-1].strip()  # Remove parentheses
+                                        # Remove commas (thousands separators) and convert to float
+                                        val_text = val_text.replace(',', '')
+                                        val = float(val_text)
+                                        if is_negative:
+                                            val = -val
+                                        # Use same value for both years
+                                        return (val, val)
+                                    except Exception as e:
+                                        print(f"    [DEBUG] Error parsing single value: {e}, value: {values[0]}")
+                                        pass
+                        
+                        return (0.0, 0.0)
+                    
+                    def extract_ratio_value(identifier_text: str) -> float:
+                        """
+                        Extract Rasio value from table structure.
+                        After finding identifier in <td>, check each sibling <td>:
+                        - If <td> has no <div> child, skip to next <td>
+                        - If <td> has <div> child, extract text and check if it's a number with decimal point
+                        """
+                        import re
+                        for div in soup.find_all('div'):
+                            text = div.get_text(strip=True)
+                            if identifier_text.upper() in text.upper() and len(text) < 5000:
+                                # Find the parent <td> element
+                                parent_td = div.find_parent('td')
+                                if not parent_td:
+                                    continue
+                                
+                                # Find the parent <tr> (table row) to get all <td> elements
+                                parent_tr = parent_td.find_parent('tr')
+                                if not parent_tr:
+                                    continue
+                                
+                                # Get all <td> elements in the row
+                                tds = parent_tr.find_all('td')
+                                
+                                # Find the index of the identifier <td>
+                                try:
+                                    identifier_td_index = tds.index(parent_td)
+                                except:
+                                    continue
+                                
+                                print(f"    [DEBUG] Found identifier '{identifier_text}' at td index {identifier_td_index}, checking next tds...")
+                                
+                                # Check each sibling <td> after the identifier
+                                for td_idx, td in enumerate(tds[identifier_td_index + 1:identifier_td_index + 30], start=identifier_td_index + 1):  # Check up to 30 <td> elements
+                                    # Check if this <td> has a <div> child
+                                    td_div = td.find('div', recursive=False)  # Only direct child, not nested
+                                    if not td_div:
+                                        # Try to find any div (including nested)
+                                        td_div = td.find('div')
+                                    
+                                    if not td_div:
+                                        # No div found in this td, skip to next
+                                        print(f"    [DEBUG]   td[{td_idx}]: no div child, skipping")
+                                        continue
+                                    
+                                    # Get text from the <div>
+                                    div_text = td_div.get_text(strip=True)
+                                    
+                                    # Remove &nbsp; entities and check if empty
+                                    div_text_clean = div_text.replace('\xa0', ' ').replace('&nbsp;', ' ').strip()
+                                    
+                                    print(f"    [DEBUG]   td[{td_idx}]: found div with text='{div_text_clean[:50]}'")
+                                    
+                                    # Skip if empty or only whitespace
+                                    if not div_text_clean or div_text_clean == '':
+                                        print(f"    [DEBUG]   td[{td_idx}]: div text is empty, skipping")
+                                        continue
+                                    
+                                    # Try to extract number - check if it's a valid numeric text
+                                    # Remove spaces and try to parse
+                                    cleaned_text = div_text_clean.replace(' ', '').replace(',', '.')
+                                    
+                                    # Check for negative (in parentheses)
+                                    is_negative = False
+                                    if cleaned_text.startswith('(') and cleaned_text.endswith(')'):
+                                        is_negative = True
+                                        cleaned_text = cleaned_text[1:-1].strip()
+                                    elif cleaned_text.startswith('-'):
+                                        is_negative = True
+                                        cleaned_text = cleaned_text[1:].strip()
+                                    
+                                    # Try to parse as float - if it's a valid number like 0.33 or 3.25
+                                    try:
+                                        number = float(cleaned_text)
+                                        if is_negative:
+                                            number = -number
+                                        # Reasonable range check
+                                        if abs(number) < 1e15:
+                                            print(f"    [DEBUG] Found {identifier_text} ratio value at td index {td_idx}: {number}")
+                                            return number
+                                    except ValueError:
+                                        # Not a valid number, skip to next td
+                                        print(f"    [DEBUG]   td[{td_idx}]: '{cleaned_text[:30]}' is not a valid number, skipping")
+                                        pass
+                                
+                                print(f"    [DEBUG] No ratio value found for '{identifier_text}' after checking {min(30, len(tds) - identifier_td_index - 1)} tds")
+                        return 0.0
+                    
+                    # Extract Laba Kotor (for Sheet 4)
+                    laba_kotor_current, laba_kotor_previous = extract_laba_kotor_value(laba_kotor_identifier)
+                    # Swap years: 2025 should be in 2024 column, 2024 should be in 2025 column
+                    result[f'Laba Kotor {selected_year}'] = laba_kotor_previous  # Swap: put previous year value in current year column
+                    result[f'Laba Kotor {previous_year}'] = laba_kotor_current   # Swap: put current year value in previous year column
+                    print(f"    [OK] Extracted Laba Kotor: {selected_year}={laba_kotor_previous}, {previous_year}={laba_kotor_current} (swapped)")
+                    
+                    # Extract all 9 ratios (for Sheet 5)
+                    ratio_identifiers = [
+                        ("Kewajiban Penyediaan Modal Minimum", "KPMM"),
+                        ("Rasio Cadangan terhadap PPKA", "PPKA"),
+                        ("Non Performing Loan (NPL) Neto", "NPL Neto"),
+                        ("Non Performing Loan (NPL) Gross", "NPL Gross"),
+                        ("Return on Assets (ROA)", "ROA"),
+                        ("Biaya Operasional terhadap Pendapatan Operasional (BOPO)", "BOPO"),
+                        ("Net Interest Margin (NIM)", "NIM"),
+                        ("Loan to Deposit Ratio (LDR)", "LDR"),
+                        ("Cash Ratio", "CR")
+                    ]
+                    
+                    for identifier, ratio_name in ratio_identifiers:
+                        value = extract_ratio_value(identifier)
+                        result[ratio_name] = value
+                        print(f"    [DEBUG] Extracted {ratio_name}: {value}")
+                else:
+                    # No ratio data found, set defaults
+                    result[f'Laba Kotor {selected_year}'] = 0
+                    result[f'Laba Kotor {previous_year}'] = 0
+                    ratio_names = ['KPMM', 'PPKA', 'NPL Neto', 'NPL Gross', 'ROA', 'BOPO', 'NIM', 'LDR', 'CR']
+                    for ratio_name in ratio_names:
+                        result[ratio_name] = 0
             
-            for identifier in dpk_identifiers:
-                values = find_and_extract(identifier)
-                if len(values) >= 2:
-                    identifier_key = identifier.strip().lower()
-                    if identifier_key not in found_dpk_identifiers:
-                        dpk_selected_year += values[0]  # First div (current year)
-                        dpk_previous_year += values[1]  # Second div (previous year)
-                        found_dpk_identifiers.add(identifier_key)
-                        print(f"    [DEBUG] Added DPK from '{identifier}': {values[0]} (2024) + {values[1]} (2023)")
-                elif len(values) == 1:
-                    identifier_key = identifier.strip().lower()
-                    if identifier_key not in found_dpk_identifiers:
-                        dpk_selected_year += values[0]  # Only current year available
-                        found_dpk_identifiers.add(identifier_key)
-                        print(f"    [DEBUG] Added DPK from '{identifier}': {values[0]} (2024 only)")
-            
-            result[f'DPK {selected_year}'] = dpk_selected_year
-            result[f'DPK {previous_year}'] = dpk_previous_year
-            
-            print(f"    [OK] Extracted DPK data: {selected_year}={dpk_selected_year}, {previous_year}={dpk_previous_year}")
             print(f"    [OK] Total extracted data points: {len(result)}")
             
             # Switch back to default content after extraction
@@ -2003,6 +3068,271 @@ class OJKExtJSScraper:
             
         except Exception as e:
             print(f"    [ERROR] Error extracting report data: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    def _extract_laba_kotor_data(self, selected_year: str, city: str = None, bank: str = None) -> dict:
+        """Extract Laba Kotor and all 9 Rasio data from the report. Returns dict with all ratio values."""
+        from bs4 import BeautifulSoup
+        import re
+        
+        try:
+            result = {
+                'city': city or 'N/A',
+                'bank': bank or 'N/A'
+            }
+            
+            previous_year = str(int(selected_year) - 1)
+            
+            # Switch to iframe if report is in iframe
+            try:
+                iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
+                if iframes:
+                    self.driver.switch_to.frame(iframes[0])
+                    print("    [DEBUG] Switched to iframe for data extraction")
+            except:
+                pass
+            
+            # Get page source and parse with BeautifulSoup
+            page_source = self.driver.page_source
+            soup = BeautifulSoup(page_source, 'html.parser')
+            
+            # Wait for page to fully load by checking for identifier
+            print("    [INFO] Memvalidasi halaman telah dimuat sepenuhnya (memeriksa identifier setiap 10 detik)...")
+            max_attempts = 20
+            check_interval = 10  # Check every 10 seconds
+            
+            identifier_found = False
+            for attempt in range(max_attempts):
+                # Check if identifier exists (check for any ratio identifier)
+                identifiers_to_check = [
+                    "LABA (RUGI) TAHUN BERJALAN SEBELUM PAJAK PENGHASILAN",
+                    "Kewajiban Penyediaan Modal Minimum",
+                    "Rasio Cadangan terhadap PPKA",
+                    "Non Performing Loan"
+                ]
+                for identifier in identifiers_to_check:
+                    for div in soup.find_all('div'):
+                        text = div.get_text(strip=True)
+                        if identifier.upper() in text.upper():
+                            identifier_found = True
+                            print(f"    [OK] Halaman telah dimuat sepenuhnya - Identifier ditemukan (percobaan {attempt + 1})")
+                            break
+                    if identifier_found:
+                        break
+                
+                if identifier_found:
+                    break
+                
+                if attempt < max_attempts - 1:
+                    print(f"    [INFO] Percobaan {attempt + 1}/{max_attempts}: Memperbarui page_source dan mem-parse ulang BeautifulSoup...")
+                    time.sleep(check_interval)
+                    page_source = self.driver.page_source
+                    soup = BeautifulSoup(page_source, 'html.parser')
+                    print(f"    [DEBUG] BeautifulSoup telah di-parse ulang (ukuran: {len(page_source)} karakter)")
+            
+            def extract_laba_kotor_value(identifier_text: str) -> tuple[float, float]:
+                """
+                Extract Laba Kotor value from table structure.
+                Structure: identifier in <td><div>, values in subsequent <td><div> elements.
+                Values can be negative in parentheses like (677,555,231).
+                Returns tuple of (current_year_value, previous_year_value)
+                """
+                import re
+                
+                for div in soup.find_all('div'):
+                    text = div.get_text(strip=True)
+                    if identifier_text.upper() in text.upper() and len(text) < 5000:
+                        # Find the parent <td> or <tr> (table row)
+                        parent_td = div.find_parent('td')
+                        if not parent_td:
+                            continue
+                        
+                        # Find the parent <tr> (table row) to get all <td> elements in the row
+                        parent_tr = parent_td.find_parent('tr')
+                        if not parent_tr:
+                            # If no <tr>, try to find subsequent <td> elements from the same parent
+                            parent_td_siblings = parent_td.find_next_siblings('td')
+                            if not parent_td_siblings:
+                                continue
+                            tds = [parent_td] + list(parent_td_siblings)
+                        else:
+                            # Get all <td> elements in the row
+                            tds = parent_tr.find_all('td')
+                        
+                        # Find the index of the identifier <td>
+                        try:
+                            identifier_td_index = tds.index(parent_td)
+                        except:
+                            continue
+                        
+                        # Extract values from subsequent <td> elements (skip the identifier <td>)
+                        # Look for numeric values in <td> elements (may have multiple <td> elements to check)
+                        values = []
+                        import re
+                        for td in tds[identifier_td_index + 1:identifier_td_index + 10]:  # Check more <td> elements to find numeric values
+                            # Look for <div> inside the <td>
+                            td_div = td.find('div')
+                            if td_div:
+                                td_text = td_div.get_text(strip=True)
+                                if td_text:
+                                    # Check if this looks like a number (contains digits, possibly with parentheses and commas)
+                                    # Pattern: optional parentheses, digits with commas, optional decimal part
+                                    # Examples: "(677,555,231)", "1,223", "123.45"
+                                    numeric_pattern = r'^\(?[\d,]+\.?\d*\)?$'
+                                    if re.match(numeric_pattern, td_text.replace(' ', '')):
+                                        values.append(td_text)
+                                        if len(values) >= 2:  # Stop after finding 2 numeric values
+                                            break
+                        
+                        # Parse the values
+                        if len(values) >= 2:
+                            # Two values: first is previous year, second is current year
+                            try:
+                                # Parse first value (previous year)
+                                val1_text = values[0].strip()
+                                is_negative1 = val1_text.startswith('(') and val1_text.endswith(')')
+                                if is_negative1:
+                                    val1_text = val1_text[1:-1].strip()  # Remove parentheses
+                                # Remove commas (thousands separators) and convert to float
+                                val1_text = val1_text.replace(',', '')
+                                val1 = float(val1_text)
+                                if is_negative1:
+                                    val1 = -val1
+                                
+                                # Parse second value (current year)
+                                val2_text = values[1].strip()
+                                is_negative2 = val2_text.startswith('(') and val2_text.endswith(')')
+                                if is_negative2:
+                                    val2_text = val2_text[1:-1].strip()  # Remove parentheses
+                                # Remove commas (thousands separators) and convert to float
+                                val2_text = val2_text.replace(',', '')
+                                val2 = float(val2_text)
+                                if is_negative2:
+                                    val2 = -val2
+                                
+                                # Return as (current_year, previous_year)
+                                return (val2, val1)
+                            except Exception as e:
+                                print(f"    [DEBUG] Error parsing two values: {e}, values: {values}")
+                                pass
+                        elif len(values) == 1:
+                            # Single value: use for both years
+                            try:
+                                val_text = values[0].strip()
+                                is_negative = val_text.startswith('(') and val_text.endswith(')')
+                                if is_negative:
+                                    val_text = val_text[1:-1].strip()  # Remove parentheses
+                                # Remove commas (thousands separators) and convert to float
+                                val_text = val_text.replace(',', '')
+                                val = float(val_text)
+                                if is_negative:
+                                    val = -val
+                                # Use same value for both years
+                                return (val, val)
+                            except Exception as e:
+                                print(f"    [DEBUG] Error parsing single value: {e}, value: {values[0]}")
+                                pass
+                
+                return (0.0, 0.0)
+            
+            def extract_ratio_value(identifier_text: str) -> float:
+                """
+                Extract Rasio value - just take the integer that has '.' in it
+                If there is bracket, meaning it's negative, parse it as is
+                """
+                for div in soup.find_all('div'):
+                    text = div.get_text(strip=True)
+                    if identifier_text.upper() in text.upper() and len(text) < 5000:
+                        # Find the next div with numeric value
+                        all_divs = soup.find_all('div')
+                        try:
+                            div_index = all_divs.index(div)
+                            # Look at next divs for the value
+                            for i in range(div_index + 1, min(div_index + 10, len(all_divs))):
+                                next_div = all_divs[i]
+                                next_text = next_div.get_text(strip=True)
+                                
+                                # Skip if too long or contains identifier keywords
+                                if len(next_text) > 100:
+                                    continue
+                                
+                                # Extract number - must have '.' in it (decimal point)
+                                cleaned_text = next_text.strip()
+                                
+                                # Check if it has a decimal point (dot)
+                                if '.' not in cleaned_text:
+                                    continue
+                                
+                                # Check for negative (in parentheses)
+                                is_negative = False
+                                if cleaned_text.startswith('(') and cleaned_text.endswith(')'):
+                                    is_negative = True
+                                    cleaned_text = cleaned_text[1:-1].strip()
+                                elif cleaned_text.startswith('-'):
+                                    is_negative = True
+                                    cleaned_text = cleaned_text[1:].strip()
+                                
+                                # Replace comma with dot for decimal separator (if comma is used)
+                                # But keep the dot that's already there
+                                cleaned_text = cleaned_text.replace(',', '.')
+                                
+                                # Try to extract number
+                                try:
+                                    number = float(cleaned_text)
+                                    if is_negative:
+                                        number = -number
+                                    # Reasonable range check
+                                    if abs(number) < 1e15:
+                                        return number
+                                except:
+                                    pass
+                        except:
+                            pass
+                return 0.0
+            
+            # Extract Laba Kotor (for Sheet 4)
+            print("    [INFO] Extracting Laba Kotor data...")
+            laba_kotor_current, laba_kotor_previous = extract_laba_kotor_value("LABA (RUGI) TAHUN BERJALAN SEBELUM PAJAK PENGHASILAN")
+            result[f'Laba Kotor {selected_year}'] = laba_kotor_current
+            result[f'Laba Kotor {previous_year}'] = laba_kotor_previous
+            print(f"    [OK] Extracted Laba Kotor: {selected_year}={laba_kotor_current}, {previous_year}={laba_kotor_previous}")
+            
+            # Define 9 ratio identifiers (for Sheet 5 only)
+            ratio_identifiers = [
+                ("Kewajiban Penyediaan Modal Minimum", "KPMM"),
+                ("Rasio Cadangan terhadap PPKA", "PPKA"),
+                ("Non Performing Loan (NPL) Neto", "NPL Neto"),
+                ("Non Performing Loan (NPL) Gross", "NPL Gross"),
+                ("Return on Assets (ROA)", "ROA"),
+                ("Biaya Operasional terhadap Pendapatan Operasional (BOPO)", "BOPO"),
+                ("Net Interest Margin (NIM)", "NIM"),
+                ("Loan to Deposit Ratio (LDR)", "LDR"),
+                ("Cash Ratio", "CR")
+            ]
+            
+            # Extract all 9 ratios (for Sheet 5)
+            print("    [INFO] Extracting all 9 Rasio data (Sheet 5)...")
+            for identifier, ratio_name in ratio_identifiers:
+                value = extract_ratio_value(identifier)
+                result[ratio_name] = value
+                print(f"    [DEBUG] Extracted {ratio_name}: {value}")
+            
+            print(f"    [OK] Extracted Laba Kotor and all 9 Rasio data")
+            print(f"    [OK] Total extracted data points: {len(result)}")
+            
+            # Switch back to default content
+            try:
+                self.driver.switch_to.default_content()
+                print("    [DEBUG] Switched back to default content")
+            except:
+                pass
+            
+            return result
+            
+        except Exception as e:
+            print(f"    [ERROR] Error extracting Laba Kotor and Rasio data: {e}")
             import traceback
             traceback.print_exc()
             return None
@@ -2106,7 +3436,7 @@ class OJKExtJSScraper:
             ws.column_dimensions['B'].width = 20
             
             # Save file
-            filename = f"OJK_Report_{year}.xlsx"
+            filename = "Perbandingan_Laporan_Publikasi_BPR.xlsx"
             filepath = self.output_dir / filename
             wb.save(filepath)
             print(f"    [OK] Data saved to {filepath}")

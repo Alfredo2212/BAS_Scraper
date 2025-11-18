@@ -30,9 +30,9 @@ def main():
         scraper.initialize()
         scraper.navigate_to_page()
         
-        # Test: Set month, year, and select province
-        print("\n[TEST] Testing month, year, and province selection...")
-        scraper.scrape_all_data(month="Desember", year="2024")
+        # Test: Auto-detect month/year based on current date
+        print("\n[TEST] Testing auto-detection of month/year and scraping...")
+        scraper.scrape_all_data()  # Will auto-detect month and year
         
     except Exception as e:
         print(f"\n[ERROR] Test failed: {e}")
