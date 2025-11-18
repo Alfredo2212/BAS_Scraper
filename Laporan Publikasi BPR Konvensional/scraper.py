@@ -2814,7 +2814,7 @@ class OJKExtJSScraper:
                 # Check if Laba Kotor/Rasio identifiers exist in the page
                 laba_kotor_identifier = "LABA (RUGI) TAHUN BERJALAN SEBELUM PAJAK PENGHASILAN"
                 ratio_identifiers_check = [
-                    "Kewajiban Penyediaan Modal Minimum",
+                    "Kewajiban Penyediaan Modal Minimum (KPMM)",
                     "Rasio Cadangan terhadap PPKA",
                     "Non Performing Loan"
                 ]
@@ -2943,9 +2943,12 @@ class OJKExtJSScraper:
                         - If <td> has <div> child, extract text and check if it's a number with decimal point
                         """
                         import re
+                        print(f"    [DEBUG] Searching for ratio identifier: '{identifier_text}'")
+                        found_identifier = False
                         for div in soup.find_all('div'):
                             text = div.get_text(strip=True)
                             if identifier_text.upper() in text.upper() and len(text) < 5000:
+                                found_identifier = True
                                 # Find the parent <td> element
                                 parent_td = div.find_parent('td')
                                 if not parent_td:
@@ -3021,6 +3024,8 @@ class OJKExtJSScraper:
                                         pass
                                 
                                 print(f"    [DEBUG] No ratio value found for '{identifier_text}' after checking {min(30, len(tds) - identifier_td_index - 1)} tds")
+                        if not found_identifier:
+                            print(f"    [DEBUG] Identifier '{identifier_text}' not found in any div element")
                         return 0.0
                     
                     # Extract Laba Kotor (for Sheet 4)
@@ -3030,9 +3035,125 @@ class OJKExtJSScraper:
                     result[f'Laba Kotor {previous_year}'] = laba_kotor_current   # Swap: put current year value in previous year column
                     print(f"    [OK] Extracted Laba Kotor: {selected_year}={laba_kotor_previous}, {previous_year}={laba_kotor_current} (swapped)")
                     
-                    # Extract all 9 ratios (for Sheet 5)
+                    # Extract all 9 ratios (for Sheet 5) - from second iframe
+                    print("    [INFO] Switching to second iframe for ratio extraction...")
+                    self.driver.switch_to.default_content()
+                    iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
+                    ratio_iframe = None
+                    ratio_soup = None
+                    
+                    if len(iframes) >= 2:
+                        # Use the second iframe (index 1) for ratios
+                        try:
+                            self.driver.switch_to.frame(iframes[1])
+                            ratio_page_source = self.driver.page_source
+                            ratio_soup = BeautifulSoup(ratio_page_source, 'html.parser')
+                            ratio_iframe = iframes[1]
+                            print(f"    [OK] Switched to second iframe (index 1) for ratio extraction")
+                        except Exception as e:
+                            print(f"    [WARNING] Could not switch to second iframe: {e}")
+                            # Fallback: use current soup
+                            ratio_soup = soup
+                    else:
+                        print(f"    [WARNING] Only {len(iframes)} iframe(s) found, expected at least 2. Using current iframe for ratios.")
+                        ratio_soup = soup
+                    
+                    # Update extract_ratio_value to use ratio_soup instead of soup
+                    def extract_ratio_value_from_soup(identifier_text: str, soup_to_use: BeautifulSoup) -> float:
+                        """
+                        Extract Rasio value from table structure using provided soup.
+                        After finding identifier in <td>, check each sibling <td>:
+                        - If <td> has no <div> child, skip to next <td>
+                        - If <td> has <div> child, extract text and check if it's a number with decimal point
+                        """
+                        import re
+                        print(f"    [DEBUG] Searching for ratio identifier: '{identifier_text}'")
+                        found_identifier = False
+                        for div in soup_to_use.find_all('div'):
+                            text = div.get_text(strip=True)
+                            if identifier_text.upper() in text.upper() and len(text) < 5000:
+                                found_identifier = True
+                                # Find the parent <td> element
+                                parent_td = div.find_parent('td')
+                                if not parent_td:
+                                    continue
+                                
+                                # Find the parent <tr> (table row) to get all <td> elements
+                                parent_tr = parent_td.find_parent('tr')
+                                if not parent_tr:
+                                    continue
+                                
+                                # Get all <td> elements in the row
+                                tds = parent_tr.find_all('td')
+                                
+                                # Find the index of the identifier <td>
+                                try:
+                                    identifier_td_index = tds.index(parent_td)
+                                except:
+                                    continue
+                                
+                                print(f"    [DEBUG] Found identifier '{identifier_text}' at td index {identifier_td_index}, checking next tds...")
+                                
+                                # Check each sibling <td> after the identifier
+                                for td_idx, td in enumerate(tds[identifier_td_index + 1:identifier_td_index + 30], start=identifier_td_index + 1):  # Check up to 30 <td> elements
+                                    # Check if this <td> has a <div> child
+                                    td_div = td.find('div', recursive=False)  # Only direct child, not nested
+                                    if not td_div:
+                                        # Try to find any div (including nested)
+                                        td_div = td.find('div')
+                                    
+                                    if not td_div:
+                                        # No div found in this td, skip to next
+                                        print(f"    [DEBUG]   td[{td_idx}]: no div child, skipping")
+                                        continue
+                                    
+                                    # Get text from the <div>
+                                    div_text = td_div.get_text(strip=True)
+                                    
+                                    # Remove &nbsp; entities and check if empty
+                                    div_text_clean = div_text.replace('\xa0', ' ').replace('&nbsp;', ' ').strip()
+                                    
+                                    print(f"    [DEBUG]   td[{td_idx}]: found div with text='{div_text_clean[:50]}'")
+                                    
+                                    # Skip if empty or only whitespace
+                                    if not div_text_clean or div_text_clean == '':
+                                        print(f"    [DEBUG]   td[{td_idx}]: div text is empty, skipping")
+                                        continue
+                                    
+                                    # Try to extract number - check if it's a valid numeric text
+                                    # Remove spaces and try to parse
+                                    cleaned_text = div_text_clean.replace(' ', '').replace(',', '.')
+                                    
+                                    # Check for negative (in parentheses)
+                                    is_negative = False
+                                    if cleaned_text.startswith('(') and cleaned_text.endswith(')'):
+                                        is_negative = True
+                                        cleaned_text = cleaned_text[1:-1].strip()
+                                    elif cleaned_text.startswith('-'):
+                                        is_negative = True
+                                        cleaned_text = cleaned_text[1:].strip()
+                                    
+                                    # Try to parse as float - if it's a valid number like 0.33 or 3.25
+                                    try:
+                                        number = float(cleaned_text)
+                                        if is_negative:
+                                            number = -number
+                                        # Reasonable range check
+                                        if abs(number) < 1e15:
+                                            print(f"    [DEBUG] Found {identifier_text} ratio value at td index {td_idx}: {number}")
+                                            return number
+                                    except ValueError:
+                                        # Not a valid number, skip to next td
+                                        print(f"    [DEBUG]   td[{td_idx}]: '{cleaned_text[:30]}' is not a valid number, skipping")
+                                        pass
+                                
+                                print(f"    [DEBUG] No ratio value found for '{identifier_text}' after checking {min(30, len(tds) - identifier_td_index - 1)} tds")
+                        if not found_identifier:
+                            print(f"    [DEBUG] Identifier '{identifier_text}' not found in any div element")
+                        return 0.0
+                    
                     ratio_identifiers = [
-                        ("Kewajiban Penyediaan Modal Minimum", "KPMM"),
+                        ("Kewajiban Penyediaan Modal Minimum (KPMM)", "KPMM"),
                         ("Rasio Cadangan terhadap PPKA", "PPKA"),
                         ("Non Performing Loan (NPL) Neto", "NPL Neto"),
                         ("Non Performing Loan (NPL) Gross", "NPL Gross"),
@@ -3044,9 +3165,19 @@ class OJKExtJSScraper:
                     ]
                     
                     for identifier, ratio_name in ratio_identifiers:
-                        value = extract_ratio_value(identifier)
+                        value = extract_ratio_value_from_soup(identifier, ratio_soup)
                         result[ratio_name] = value
                         print(f"    [DEBUG] Extracted {ratio_name}: {value}")
+                    
+                    # Switch back to first iframe (or default content) after ratio extraction
+                    if ratio_iframe:
+                        try:
+                            self.driver.switch_to.default_content()
+                            if report_iframe:
+                                self.driver.switch_to.frame(report_iframe)
+                            print("    [DEBUG] Switched back to first iframe after ratio extraction")
+                        except:
+                            self.driver.switch_to.default_content()
                 else:
                     # No ratio data found, set defaults
                     result[f'Laba Kotor {selected_year}'] = 0
