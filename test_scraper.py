@@ -1,6 +1,7 @@
 """
 Simple test script for OJK ExtJS Scraper
 Tests the scraper with direct URL approach
+Saves output to production OSS folder: D:\APP\OSS\client\assets\publikasi
 """
 
 import sys
@@ -20,15 +21,32 @@ OJKExtJSScraper = scraper_module.OJKExtJSScraper
 
 def main():
     """Test the ExtJS scraper"""
+    # Production output directory
+    production_output_dir = Path(r"D:\APP\OSS\client\assets\publikasi")
+    
     print("OJK ExtJS Scraper Test")
     print("=" * 60)
     print("This will navigate directly to BPR Konvensional report page")
-    print("and test ExtJS combobox interactions\n")
+    print("and test ExtJS combobox interactions")
+    print(f"Output will be saved to: {production_output_dir}\n")
+    
+    # Create output directory if it doesn't exist
+    try:
+        production_output_dir.mkdir(parents=True, exist_ok=True)
+        print(f"[OK] Output directory ready: {production_output_dir}\n")
+    except Exception as e:
+        print(f"[ERROR] Failed to create output directory: {e}")
+        return
     
     scraper = OJKExtJSScraper(headless=False)
     try:
         scraper.initialize()
         scraper.navigate_to_page()
+        
+        # Override output directory to production folder
+        scraper.output_dir = production_output_dir
+        scraper.output_dir.mkdir(parents=True, exist_ok=True)
+        print(f"[INFO] Output directory set to: {production_output_dir}\n")
         
         # Test: Run all 3 phases sequentially (new 3-phase implementation)
         print("\n[TEST] Testing 3-phase scraping with auto-detection of month/year...")
@@ -36,14 +54,16 @@ def main():
         print("[TEST] Each phase will have its own Chrome session\n")
         scraper.run_all_phases()  # Will auto-detect month and year, run all 3 phases
         
+        print(f"\n[OK] Test completed successfully!")
+        print(f"[INFO] Output saved to: {production_output_dir}")
+        
     except Exception as e:
         print(f"\n[ERROR] Test failed: {e}")
         import traceback
         traceback.print_exc()
     finally:
         # Cleanup Selenium resources
-        print("\n[OK] Test completed")
-        print("[INFO] Membersihkan sumber daya Selenium...")
+        print("\n[INFO] Membersihkan sumber daya Selenium...")
         # Use kill_processes=True to ensure all Chrome processes are terminated
         scraper.cleanup(kill_processes=True)
         print("[OK] Semua sumber daya telah dibersihkan")
