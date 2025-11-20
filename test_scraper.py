@@ -30,9 +30,11 @@ def main():
         scraper.initialize()
         scraper.navigate_to_page()
         
-        # Test: Auto-detect month/year based on current date
-        print("\n[TEST] Testing auto-detection of month/year and scraping...")
-        scraper.scrape_all_data()  # Will auto-detect month and year
+        # Test: Run all 3 phases sequentially (new 3-phase implementation)
+        print("\n[TEST] Testing 3-phase scraping with auto-detection of month/year...")
+        print("[TEST] This will run Phase 001, Phase 002, and Phase 003 sequentially")
+        print("[TEST] Each phase will have its own Chrome session\n")
+        scraper.run_all_phases()  # Will auto-detect month and year, run all 3 phases
         
     except Exception as e:
         print(f"\n[ERROR] Test failed: {e}")

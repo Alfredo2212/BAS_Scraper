@@ -164,8 +164,12 @@ class OJKExtJSScraper:
     def _get_target_month_year(self) -> tuple[str, str]:
         """
         Determine target month and year based on current date.
-        Finds the most recent quarter-end month (Maret, Juni, September, Desember) 
-        that is backward (in the past) from current date.
+        Uses quarterly mapping logic:
+        - Jan, Feb, Mar → use December (YYYY-1)
+        - Apr, May, Jun → use March YYYY
+        - Jul, Aug, Sep → use June YYYY
+        - Oct, Nov, Dec → use September YYYY
+        Where YYYY is the current server year.
         
         Returns:
             Tuple of (month_name, year) e.g., ("September", "2025")
@@ -176,34 +180,27 @@ class OJKExtJSScraper:
         current_month = now.month
         current_year = now.year
         
-        # Available quarter-end months mapping:
-        # 03 is Maret
-        # 06 is Juni
-        # 09 is September
-        # 12 is Desember
-        quarter_months = [3, 6, 9, 12]  # March, June, September, December
+        # Quarterly mapping logic
         month_names = {
-            3: "Maret",   # 03
-            6: "Juni",    # 06
+            3: "Maret",      # 03
+            6: "Juni",       # 06
             9: "September",  # 09
             12: "Desember"   # 12
         }
-         
-        # Find the largest quarter month that is <= current month
-        target_month_num = None
-        target_year = current_year
         
-        for qm in sorted(quarter_months, reverse=True):
-            if qm <= current_month:
-                target_month_num = qm
-                target_year = current_year
-                break
-        
-        # If no quarter month found (e.g., January/February), use December of previous year
-        # Example: January 2026 -> December 2025
-        if target_month_num is None:
+        # Map current month to quarterly report month
+        if current_month in [1, 2, 3]:  # Jan, Feb, Mar
             target_month_num = 12  # Desember
             target_year = current_year - 1
+        elif current_month in [4, 5, 6]:  # Apr, May, Jun
+            target_month_num = 3  # Maret
+            target_year = current_year
+        elif current_month in [7, 8, 9]:  # Jul, Aug, Sep
+            target_month_num = 6  # Juni
+            target_year = current_year
+        else:  # Oct, Nov, Dec
+            target_month_num = 9  # September
+            target_year = current_year
         
         month_name = month_names[target_month_num]
         
@@ -449,18 +446,21 @@ class OJKExtJSScraper:
         except Exception as e:
             print(f"  [WARNING] Error selecting province: {e}")
     
-    def scrape_all_data(self, month: str = None, year: str = None):
+    def scrape_all_data(self, month: str = None, year: str = None, phase: str = 'all'):
         """
         Main scraping loop
         Iterates through all provinces, cities, and banks
         
         Flow:
-        1. Check first checkbox → iterate all cities/banks → generate Sheets 1-3 (ASET, Kredit, DPK)
-        2. Change checkboxes (uncheck first, check two new ones) → iterate all cities/banks again → generate Sheets 4-5 (Laba Kotor, Rasio)
+        - phase='all': Run all phases sequentially (original behavior)
+        - phase='001': Run only Phase 1 (checkbox 001 → Sheets 1-3), then close Chrome and update Excel
+        - phase='002': Run only Phase 2 (checkbox 002 → Sheet 4), then close Chrome and update Excel
+        - phase='003': Run only Phase 3 (checkbox 003 → Sheet 5), then close Chrome and update Excel
         
         Args:
             month: Month to select (e.g., "Desember"). If None, auto-detects based on current date.
             year: Year to select (e.g., "2024"). If None, auto-detects based on current date.
+            phase: Phase to run ('all', '001', '002', '003'). Default is 'all'.
         """
         # Auto-detect month and year if not provided
         if month is None or year is None:
@@ -472,6 +472,7 @@ class OJKExtJSScraper:
         self.current_month = month
         self.current_year = year
         
+        # Initialize browser if needed
         if self.driver is None:
             self.initialize()
         
@@ -490,8 +491,9 @@ class OJKExtJSScraper:
         else:
             print("[WARNING] ExtJS not available, but will try to continue...")
         
-        # Setup month, year, and province (only once before sheets 1-3)
-        self._setup_month_year_province(month, year)
+        # Navigate to page if not already there
+        if self.driver.current_url != self.base_url:
+            self.navigate_to_page()
         
         # Store the year from input field for Excel labeling
         excel_year = year  # Default to provided year
@@ -503,273 +505,434 @@ class OJKExtJSScraper:
         except:
             pass
         
-        # Step 4: Select initial dropdowns and checkboxes (only once at start)
-        print("\n[Step 4] Starting initial dropdown and checkbox selection...")
-        print("[INFO] Setting up for Sheets 1-3 (ASET, Kredit, DPK)...")
-        
-        # Normal flow: First 3 sheets
-        self._select_initial_dropdowns_and_checkboxes()
-        
-        # Wait a bit after checkbox is ticked to ensure dropdowns are ready
-        print("\n[INFO] Waiting for dropdowns to be ready after checkbox selection...")
-        time.sleep(1.5)  # Reduced by 50% (was 2.0)
-        
-        # Initialize Excel file
-        self._initialize_excel(year)
-        # Initialize separate data lists for Sheets 1-3 and Sheets 4-5
-        self.sheets_1_3_data = []
-        self.sheets_4_5_data = []
-        
-        # Step 5: Sequential iteration through cities and banks for Sheets 1-3
-        # This starts AFTER checkbox is ticked - we iterate through all cities, then all banks
-        print("\n[Step 5] Starting sequential iteration through all cities and all banks for Sheets 1-3...")
-        print("[INFO] Iteration starts after checkbox is ticked - will select city, then bank, then click Tampilkan for each combination")
-        
-        # Iterate through all cities until no more cities are found
-        city_index = 0
-        while True:
-            print(f"\n{'='*60}")
-            print(f"[CITY] Processing city at index {city_index}...")
-            print(f"{'='*60}")
+        # Phase 001: Sheets 1-3 (ASET, Kredit, DPK)
+        if phase == '001' or phase == 'all':
+            print("\n" + "="*60)
+            print("[PHASE 001] Starting Phase 1: Sheets 1-3 (ASET, Kredit, DPK)")
+            print("="*60)
             
-            # Get city by index
-            current_city = self._get_city_by_index(city_index)
-            if not current_city:
-                print(f"  [INFO] No city found at index {city_index}. Reached end of cities list.")
-                break  # No more cities, exit loop
+            # Setup month, year, and province
+            self._setup_month_year_province(month, year)
             
-            is_first_bank_in_city = True
+            # Select initial dropdowns and checkboxes (checkbox 001)
+            print("\n[Step 4] Starting initial dropdown and checkbox selection...")
+            print("[INFO] Setting up for Sheets 1-3 (ASET, Kredit, DPK)...")
+            self._select_initial_dropdowns_and_checkboxes()
             
-            # Get all banks for this city (only once per city)
-            # Wait a bit after city selection to ensure dropdown is ready
-            time.sleep(0.75)  # MAX(0.5, 50% of 1.0) = 0.5 - Wait for city selection to fully load
-            print(f"\n[INFO] Processing: {current_city}")
-            bank_names = self._get_all_bank_names(city_index, city_already_selected=True)
-            print(f"  [INFO] Found {len(bank_names)} banks in {current_city}")
+            # Wait a bit after checkbox is ticked to ensure dropdowns are ready
+            print("\n[INFO] Waiting for dropdowns to be ready after checkbox selection...")
+            time.sleep(1.5)
             
-            # If no banks found, wait a bit and retry once
-            if not bank_names:
-                print(f"  [WARNING] No banks found on first attempt, waiting and retrying...")
-                time.sleep(1.125)  # MAX(0.5, 50% of 1.5) = 0.75
-                bank_names = self._get_all_bank_names(city_index, city_already_selected=True)
-                print(f"  [INFO] Found {len(bank_names)} banks in {current_city} (retry)")
+            # Initialize Excel file
+            self._initialize_excel(year)
+            # Initialize separate data lists for Sheets 1-3 and Sheets 4-5
+            self.sheets_1_3_data = []
+            self.sheets_4_5_data = []
             
-            if not bank_names:
-                print(f"  [WARNING] No banks found in {current_city}, moving to next city...")
-                city_index += 1
+            # Iterate through all cities and banks for Sheets 1-3
+            print("\n[Step 5] Starting sequential iteration through all cities and all banks for Sheets 1-3...")
+            print("[INFO] Iteration starts after checkbox is ticked - will select city, then bank, then click Tampilkan for each combination")
+            
+            city_index = 0
+            while True:
+                print(f"\n{'='*60}")
+                print(f"[CITY] Processing city at index {city_index}...")
+                print(f"{'='*60}")
+                
                 current_city = self._get_city_by_index(city_index)
+                if not current_city:
+                    print(f"  [INFO] No city found at index {city_index}. Reached end of cities list.")
+                    break
+                
                 is_first_bank_in_city = True
-                continue
+                time.sleep(0.75)
+                print(f"\n[INFO] Processing: {current_city}")
+                bank_names = self._get_all_bank_names(city_index, city_already_selected=True)
+                print(f"  [INFO] Found {len(bank_names)} banks in {current_city}")
                 
-            # Iterate through all banks in this city
-            for bank_index, current_bank in enumerate(bank_names):
-                    
-                print(f"\n  [BANK ({bank_index+1}/{len(bank_names)})] Processing: {current_bank}")
+                if not bank_names:
+                    print(f"  [WARNING] No banks found on first attempt, waiting and retrying...")
+                    time.sleep(1.125)
+                    bank_names = self._get_all_bank_names(city_index, city_already_selected=True)
+                    print(f"  [INFO] Found {len(bank_names)} banks in {current_city} (retry)")
                 
-                # Select the bank by index (bank_index = 0 selects first span, bank_index = 1 selects second, etc.)
-                # Add retry logic for index 0, especially after city change
-                max_retries = 3 if bank_index == 0 else 1
-                selected_bank_name = None
-                
-                for retry in range(max_retries):
-                    selected_bank_name = self._select_bank_by_index(bank_index, city_index, city_already_selected=True)
-                    if selected_bank_name:
-                        break
-                    elif retry < max_retries - 1:
-                        print(f"  [WARNING] Could not select bank at index {bank_index}, retrying ({retry+1}/{max_retries})...")
-                        time.sleep(1.125)  # MAX(0.5, 50% of 1.0) = 0.5 - Wait before retry
-                
-                if not selected_bank_name:
-                    print(f"  [WARNING] Could not select bank at index {bank_index} after {max_retries} attempts")
+                if not bank_names:
+                    print(f"  [WARNING] No banks found in {current_city}, moving to next city...")
+                    city_index += 1
                     continue
                 
-                time.sleep(1.125)  # MAX(0.5, 50% of 1.0) = 0.5 - Wait for bank selection to load
-                
-                # Click Tampilkan and extract data - MUST complete before moving to next bank
-                print(f"  [INFO] Clicking Tampilkan and waiting for data extraction to complete...")
-                extracted_data = self._click_tampilkan_and_extract_data(year, current_city, selected_bank_name, extract_mode='sheets_1_3')
-                
-                if extracted_data:
-                    # Store data for later Excel generation
-                    print(f"  [INFO] Storing data...")
-                    self._append_to_excel(extracted_data, year, current_city, selected_bank_name, is_first_bank_in_city, data_list='sheets_1_3')
-                    print(f"  [OK] Data successfully extracted and saved to Excel for {current_city} - {selected_bank_name}")
-                    is_first_bank_in_city = False
-                    # Wait longer to ensure Excel data is fully written
-                    time.sleep(1.125)  # MAX(0.5, 50% of 1.0) = 0.5
-                else:
-                    print(f"  [WARNING] Failed to extract data for {current_city} - {selected_bank_name}")
-                
-                # Check if this is the last bank - if so, wait a bit before moving to next city
-                if bank_index == len(bank_names) - 1:
-                    print(f"  [INFO] This is the last bank ({bank_index+1}/{len(bank_names)}) in {current_city}")
-                    time.sleep(1.125)  # MAX(0.5, 50% of 1.0) = 0.5 - Additional wait after last bank
-            
-            # After processing ALL banks in this city, move to next city
-            print(f"  [INFO] Finished processing all {len(bank_names)} banks in {current_city}")
-            print(f"  [INFO] Moving to next city...")
-            time.sleep(0.75)  # MAX(0.5, 50% of 1.0) = 0.5 - Wait before changing city
-            
-            # Move to next city
-            city_index += 1
-        
-        # Now proceed to Sheet 4: Laba Kotor
-        print("\n" + "="*60)
-        print("[INFO] Starting Sheet 4: Laba Kotor")
-        print("="*60)
-        
-        # Verify browser session is still alive before proceeding
-        print("[INFO] Verifying browser session is still active...")
-        try:
-            # Try to get current URL to verify session
-            current_url = self.driver.current_url
-            print(f"[OK] Browser session is active (current URL: {current_url[:80]}...)")
-        except Exception as e:
-            print(f"[ERROR] Browser session is invalid: {e}")
-            print("[ERROR] Cannot proceed with Laba Kotor/Rasio extraction - browser session ended")
-            print("[INFO] Finalizing Excel with collected data from Sheets 1-3...")
-            # Finalize Excel with what we have
-            self._finalize_excel(month, year)
-            self._finalize_excel_laba_kotor(month, year)
-            self._finalize_excel_rasio(month, year)
-            print("[INFO] Closing browser...")
-            self.cleanup()
-            return
-        
-        # Refresh the page to get a clean state
-        print("\n[INFO] Refreshing page to get clean state for Sheets 4-5...")
-        self.driver.refresh()
-        time.sleep(3.0)  # Wait for page to reload
-        
-        # Wait for page to fully load
-        print("[INFO] Waiting for page to fully load after refresh...")
-        time.sleep(0.75)
-        
-        # Re-do the full setup: month, year, province, and checkboxes (002 and 003)
-        print("\n[INFO] Re-setting up month, year, province, and checkboxes for Sheets 4-5...")
-        self._setup_for_sheets_4_5(month, year)
-        
-        # Wait a bit after checkbox is ticked to ensure dropdowns are ready
-        print("\n[INFO] Waiting for dropdowns to be ready after checkbox selection...")
-        time.sleep(1.5)
-        
-        # Clear data storage for Laba Kotor (use separate list)
-        self.sheets_4_5_data = []
-        
-        # Re-iterate through all cities and all banks for Laba Kotor (starting from index 0)
-        print("\n[INFO] Starting iteration through all cities for Laba Kotor and Rasio (starting from index 0)...")
-        
-        # Iterate through all cities until no more cities are found
-        city_index = 0
-        while True:
-            print(f"\n{'='*60}")
-            print(f"[CITY] Processing city at index {city_index}...")
-            print(f"{'='*60}")
-            
-            # Get city by index
-            current_city = self._get_city_by_index(city_index)
-            if not current_city:
-                print(f"  [INFO] No city found at index {city_index}. Reached end of cities list.")
-                break  # No more cities, exit loop
-            
-            is_first_bank_in_city = True
-            
-            # Get all banks for this city (only once per city)
-            # Wait a bit after city selection to ensure dropdown is ready
-            time.sleep(0.75)  # MAX(0.5, 50% of 1.0) = 0.5 - Wait for city selection to fully load
-            print(f"\n[INFO] Processing: {current_city}")
-            bank_names = self._get_all_bank_names(city_index, city_already_selected=True)
-            print(f"  [INFO] Found {len(bank_names)} banks in {current_city}")
-            
-            # If no banks found, wait a bit and retry once
-            if not bank_names:
-                print(f"  [WARNING] No banks found on first attempt, waiting and retrying...")
-                time.sleep(1.125)  # MAX(0.5, 50% of 1.5) = 0.75
-                bank_names = self._get_all_bank_names(city_index, city_already_selected=True)
-                print(f"  [INFO] Found {len(bank_names)} banks in {current_city} (retry)")
-            
-            if not bank_names:
-                print(f"  [WARNING] No banks found in {current_city}, moving to next city...")
-                city_index += 1
-                current_city = self._get_city_by_index(city_index)
-                is_first_bank_in_city = True
-                continue
-                
-            # Iterate through all banks in this city
-            for bank_index, current_bank in enumerate(bank_names):
+                for bank_index, current_bank in enumerate(bank_names):
+                    print(f"\n  [BANK ({bank_index+1}/{len(bank_names)})] Processing: {current_bank}")
                     
-                print(f"\n  [BANK ({bank_index+1}/{len(bank_names)})] Processing: {current_bank}")
+                    max_retries = 3 if bank_index == 0 else 1
+                    selected_bank_name = None
+                    
+                    for retry in range(max_retries):
+                        selected_bank_name = self._select_bank_by_index(bank_index, city_index, city_already_selected=True)
+                        if selected_bank_name:
+                            break
+                        elif retry < max_retries - 1:
+                            print(f"  [WARNING] Could not select bank at index {bank_index}, retrying ({retry+1}/{max_retries})...")
+                            time.sleep(1.125)
+                    
+                    if not selected_bank_name:
+                        print(f"  [WARNING] Could not select bank at index {bank_index} after {max_retries} attempts")
+                        continue
+                    
+                    time.sleep(1.125)
+                    
+                    print(f"  [INFO] Clicking Tampilkan and waiting for data extraction to complete...")
+                    extracted_data = self._click_tampilkan_and_extract_data(year, current_city, selected_bank_name, extract_mode='sheets_1_3')
+                    
+                    if extracted_data:
+                        print(f"  [INFO] Storing data...")
+                        self._append_to_excel(extracted_data, year, current_city, selected_bank_name, is_first_bank_in_city, data_list='sheets_1_3')
+                        print(f"  [OK] Data successfully extracted and saved to Excel for {current_city} - {selected_bank_name}")
+                        is_first_bank_in_city = False
+                        time.sleep(1.125)
+                    else:
+                        print(f"  [WARNING] Failed to extract data for {current_city} - {selected_bank_name}")
+                    
+                    if bank_index == len(bank_names) - 1:
+                        print(f"  [INFO] This is the last bank ({bank_index+1}/{len(bank_names)}) in {current_city}")
+                        time.sleep(1.125)
                 
-                # Select the bank by index (bank_index = 0 selects first span, bank_index = 1 selects second, etc.)
-                # Add retry logic for index 0, especially after city change
-                max_retries = 3 if bank_index == 0 else 1
-                selected_bank_name = None
+                print(f"  [INFO] Finished processing all {len(bank_names)} banks in {current_city}")
+                print(f"  [INFO] Moving to next city...")
+                time.sleep(0.75)
+                city_index += 1
+            
+            # If phase is '001' only, close Chrome and update Excel
+            if phase == '001':
+                print("\n[OK] Phase 001 data collection completed!")
+                print("[INFO] Closing browser...")
+                self.cleanup()
                 
-                for retry in range(max_retries):
-                    selected_bank_name = self._select_bank_by_index(bank_index, city_index, city_already_selected=True)
-                    if selected_bank_name:
-                        break
-                    elif retry < max_retries - 1:
-                        print(f"  [WARNING] Could not select bank at index {bank_index}, retrying ({retry+1}/{max_retries})...")
-                        time.sleep(1.125)  # MAX(0.5, 50% of 1.0) = 0.5 - Wait before retry
+                print("\n" + "="*60)
+                print("[INFO] Updating Excel file with Phase 001 data...")
+                print("="*60)
+                self._finalize_excel(month, excel_year)
+                print("\n[OK] Phase 001 completed successfully!")
+                return
+        
+        # Phase 002: Sheet 4 (Laba Kotor)
+        if phase == '002' or phase == 'all':
+            if phase == '002':
+                print("\n" + "="*60)
+                print("[PHASE 002] Starting Phase 2: Sheet 4 (Laba Kotor)")
+                print("="*60)
                 
-                if not selected_bank_name:
-                    print(f"  [WARNING] Could not select bank at index {bank_index} after {max_retries} attempts")
+                # Setup month, year, and province
+                self._setup_month_year_province(month, year)
+                
+                # Select checkbox 002 only
+                print("\n[Step 4] Setting up checkbox 002 only (Laba Kotor)...")
+                self._select_checkbox_002_only()
+                
+                # Wait a bit after checkbox is ticked
+                print("\n[INFO] Waiting for dropdowns to be ready after checkbox selection...")
+                time.sleep(1.5)
+                
+                # Initialize data storage
+                self.sheets_4_5_data = []
+            else:
+                # phase == 'all': Continue from Phase 001
+                print("\n" + "="*60)
+                print("[INFO] Starting Sheet 4: Laba Kotor")
+                print("="*60)
+                
+                # Verify browser session is still alive
+                print("[INFO] Verifying browser session is still active...")
+                try:
+                    current_url = self.driver.current_url
+                    print(f"[OK] Browser session is active (current URL: {current_url[:80]}...)")
+                except Exception as e:
+                    print(f"[ERROR] Browser session is invalid: {e}")
+                    print("[ERROR] Cannot proceed with Laba Kotor/Rasio extraction - browser session ended")
+                    print("[INFO] Finalizing Excel with collected data from Sheets 1-3...")
+                    self._finalize_excel(month, excel_year)
+                    self._finalize_excel_laba_kotor(month, excel_year)
+                    self._finalize_excel_rasio(month, excel_year)
+                    print("[INFO] Closing browser...")
+                    self.cleanup()
+                    return
+                
+                # Refresh the page to get a clean state
+                print("\n[INFO] Refreshing page to get clean state for Sheets 4-5...")
+                self.driver.refresh()
+                time.sleep(3.0)
+                
+                print("[INFO] Waiting for page to fully load after refresh...")
+                time.sleep(0.75)
+                
+                # Re-do the full setup: month, year, province, and checkboxes (002 and 003)
+                print("\n[INFO] Re-setting up month, year, province, and checkboxes for Sheets 4-5...")
+                self._setup_for_sheets_4_5(month, year)
+                
+                # Wait a bit after checkbox is ticked
+                print("\n[INFO] Waiting for dropdowns to be ready after checkbox selection...")
+                time.sleep(1.5)
+                
+                # Clear data storage for Laba Kotor
+                self.sheets_4_5_data = []
+            
+            # Iterate through all cities and banks for Laba Kotor
+            print("\n[INFO] Starting iteration through all cities for Laba Kotor...")
+            
+            city_index = 0
+            while True:
+                print(f"\n{'='*60}")
+                print(f"[CITY] Processing city at index {city_index}...")
+                print(f"{'='*60}")
+                
+                current_city = self._get_city_by_index(city_index)
+                if not current_city:
+                    print(f"  [INFO] No city found at index {city_index}. Reached end of cities list.")
+                    break
+                
+                is_first_bank_in_city = True
+                time.sleep(0.75)
+                print(f"\n[INFO] Processing: {current_city}")
+                bank_names = self._get_all_bank_names(city_index, city_already_selected=True)
+                print(f"  [INFO] Found {len(bank_names)} banks in {current_city}")
+                
+                if not bank_names:
+                    print(f"  [WARNING] No banks found on first attempt, waiting and retrying...")
+                    time.sleep(1.125)
+                    bank_names = self._get_all_bank_names(city_index, city_already_selected=True)
+                    print(f"  [INFO] Found {len(bank_names)} banks in {current_city} (retry)")
+                
+                if not bank_names:
+                    print(f"  [WARNING] No banks found in {current_city}, moving to next city...")
+                    city_index += 1
                     continue
                 
-                time.sleep(1.125)  # MAX(0.5, 50% of 1.0) = 0.5 - Wait for bank selection to load
+                for bank_index, current_bank in enumerate(bank_names):
+                    print(f"\n  [BANK ({bank_index+1}/{len(bank_names)})] Processing: {current_bank}")
+                    
+                    max_retries = 3 if bank_index == 0 else 1
+                    selected_bank_name = None
+                    
+                    for retry in range(max_retries):
+                        selected_bank_name = self._select_bank_by_index(bank_index, city_index, city_already_selected=True)
+                        if selected_bank_name:
+                            break
+                        elif retry < max_retries - 1:
+                            print(f"  [WARNING] Could not select bank at index {bank_index}, retrying ({retry+1}/{max_retries})...")
+                            time.sleep(1.125)
+                    
+                    if not selected_bank_name:
+                        print(f"  [WARNING] Could not select bank at index {bank_index} after {max_retries} attempts")
+                        continue
+                    
+                    time.sleep(1.125)
+                    
+                    print(f"  [INFO] Clicking Tampilkan and waiting for data extraction to complete...")
+                    # For phase 002, extract only Laba Kotor (skip Rasio)
+                    extracted_data = self._click_tampilkan_and_extract_data(year, current_city, selected_bank_name, extract_mode='sheets_4_5', skip_rasio=True)
+                    
+                    if extracted_data:
+                        print(f"  [INFO] Storing data...")
+                        self._append_to_excel(extracted_data, year, current_city, selected_bank_name, is_first_bank_in_city, data_list='sheets_4_5')
+                        print(f"  [OK] Data successfully extracted and saved to Excel for {current_city} - {selected_bank_name}")
+                        is_first_bank_in_city = False
+                        time.sleep(1.125)
+                    else:
+                        print(f"  [WARNING] Failed to extract data for {current_city} - {selected_bank_name}")
+                    
+                    if bank_index == len(bank_names) - 1:
+                        print(f"  [INFO] This is the last bank ({bank_index+1}/{len(bank_names)}) in {current_city}")
+                        time.sleep(1.125)
                 
-                # Click Tampilkan and extract data - MUST complete before moving to next bank
-                print(f"  [INFO] Clicking Tampilkan and waiting for data extraction to complete...")
-                extracted_data = self._click_tampilkan_and_extract_data(year, current_city, selected_bank_name, extract_mode='sheets_4_5')
-                
-                if extracted_data:
-                    # Store data for later Excel generation
-                    print(f"  [INFO] Storing data...")
-                    self._append_to_excel(extracted_data, year, current_city, selected_bank_name, is_first_bank_in_city, data_list='sheets_4_5')
-                    print(f"  [OK] Data successfully extracted and saved to Excel for {current_city} - {selected_bank_name}")
-                    is_first_bank_in_city = False
-                    # Wait longer to ensure Excel data is fully written
-                    time.sleep(1.125)  # MAX(0.5, 50% of 1.0) = 0.5
-                else:
-                    print(f"  [WARNING] Failed to extract data for {current_city} - {selected_bank_name}")
-                
-                # Check if this is the last bank - if so, wait a bit before moving to next city
-                if bank_index == len(bank_names) - 1:
-                    print(f"  [INFO] This is the last bank ({bank_index+1}/{len(bank_names)}) in {current_city}")
-                    time.sleep(1.125)  # MAX(0.5, 50% of 1.0) = 0.5 - Additional wait after last bank
+                print(f"  [INFO] Finished processing all {len(bank_names)} banks in {current_city}")
+                print(f"  [INFO] Moving to next city...")
+                time.sleep(0.75)
+                city_index += 1
             
-            # After processing ALL banks in this city, move to next city
-            print(f"  [INFO] Finished processing all {len(bank_names)} banks in {current_city}")
-            print(f"  [INFO] Moving to next city...")
-            time.sleep(0.75)  # MAX(0.5, 50% of 1.0) = 0.5 - Wait before changing city
-            
-            # Move to next city
-            city_index += 1
+            # If phase is '002' only, close Chrome and update Excel
+            if phase == '002':
+                print("\n[OK] Phase 002 data collection completed!")
+                print("[INFO] Closing browser...")
+                self.cleanup()
+                
+                print("\n" + "="*60)
+                print("[INFO] Updating Excel file with Phase 002 data...")
+                print("="*60)
+                self._finalize_excel_laba_kotor(month, excel_year)
+                print("\n[OK] Phase 002 completed successfully!")
+                return
         
+        # Phase 003: Sheet 5 (Rasio)
+        if phase == '003' or phase == 'all':
+            if phase == '003':
+                print("\n" + "="*60)
+                print("[PHASE 003] Starting Phase 3: Sheet 5 (Rasio)")
+                print("="*60)
+                
+                # Setup month, year, and province
+                self._setup_month_year_province(month, year)
+                
+                # Select checkbox 003 only
+                print("\n[Step 4] Setting up checkbox 003 only (Rasio)...")
+                self._select_checkbox_003_only()
+                
+                # Wait a bit after checkbox is ticked
+                print("\n[INFO] Waiting for dropdowns to be ready after checkbox selection...")
+                time.sleep(1.5)
+                
+                # Initialize data storage
+                self.sheets_4_5_data = []
+            # else: phase == 'all' continues from Phase 002 (no refresh needed, just continue)
+            
+            # Iterate through all cities and banks for Rasio
+            print("\n[INFO] Starting iteration through all cities for Rasio...")
+            
+            city_index = 0
+            while True:
+                print(f"\n{'='*60}")
+                print(f"[CITY] Processing city at index {city_index}...")
+                print(f"{'='*60}")
+                
+                current_city = self._get_city_by_index(city_index)
+                if not current_city:
+                    print(f"  [INFO] No city found at index {city_index}. Reached end of cities list.")
+                    break
+                
+                is_first_bank_in_city = True
+                time.sleep(0.75)
+                print(f"\n[INFO] Processing: {current_city}")
+                bank_names = self._get_all_bank_names(city_index, city_already_selected=True)
+                print(f"  [INFO] Found {len(bank_names)} banks in {current_city}")
+                
+                if not bank_names:
+                    print(f"  [WARNING] No banks found on first attempt, waiting and retrying...")
+                    time.sleep(1.125)
+                    bank_names = self._get_all_bank_names(city_index, city_already_selected=True)
+                    print(f"  [INFO] Found {len(bank_names)} banks in {current_city} (retry)")
+                
+                if not bank_names:
+                    print(f"  [WARNING] No banks found in {current_city}, moving to next city...")
+                    city_index += 1
+                    continue
+                
+                for bank_index, current_bank in enumerate(bank_names):
+                    print(f"\n  [BANK ({bank_index+1}/{len(bank_names)})] Processing: {current_bank}")
+                    
+                    max_retries = 3 if bank_index == 0 else 1
+                    selected_bank_name = None
+                    
+                    for retry in range(max_retries):
+                        selected_bank_name = self._select_bank_by_index(bank_index, city_index, city_already_selected=True)
+                        if selected_bank_name:
+                            break
+                        elif retry < max_retries - 1:
+                            print(f"  [WARNING] Could not select bank at index {bank_index}, retrying ({retry+1}/{max_retries})...")
+                            time.sleep(1.125)
+                    
+                    if not selected_bank_name:
+                        print(f"  [WARNING] Could not select bank at index {bank_index} after {max_retries} attempts")
+                        continue
+                    
+                    time.sleep(1.125)
+                    
+                    print(f"  [INFO] Clicking Tampilkan and waiting for data extraction to complete...")
+                    # For phase 003, extract only Rasio (skip Laba Kotor)
+                    extracted_data = self._click_tampilkan_and_extract_data(year, current_city, selected_bank_name, extract_mode='sheets_4_5', skip_laba_kotor=True)
+                    
+                    if extracted_data:
+                        print(f"  [INFO] Storing data...")
+                        self._append_to_excel(extracted_data, year, current_city, selected_bank_name, is_first_bank_in_city, data_list='sheets_4_5')
+                        print(f"  [OK] Data successfully extracted and saved to Excel for {current_city} - {selected_bank_name}")
+                        is_first_bank_in_city = False
+                        time.sleep(1.125)
+                    else:
+                        print(f"  [WARNING] Failed to extract data for {current_city} - {selected_bank_name}")
+                    
+                    if bank_index == len(bank_names) - 1:
+                        print(f"  [INFO] This is the last bank ({bank_index+1}/{len(bank_names)}) in {current_city}")
+                        time.sleep(1.125)
+                
+                print(f"  [INFO] Finished processing all {len(bank_names)} banks in {current_city}")
+                print(f"  [INFO] Moving to next city...")
+                time.sleep(0.75)
+                city_index += 1
+            
+            # If phase is '003' only, close Chrome and update Excel
+            if phase == '003':
+                print("\n[OK] Phase 003 data collection completed!")
+                print("[INFO] Closing browser...")
+                self.cleanup()
+                
+                print("\n" + "="*60)
+                print("[INFO] Updating Excel file with Phase 003 data...")
+                print("="*60)
+                print("[INFO] Starting Sheet 5: Rasio (9 tables)")
+                self._finalize_excel_rasio(month, excel_year)
+                print("\n[OK] Phase 003 completed successfully!")
+                return
+        
+        # phase == 'all': Finalize all Excel sheets
         print("\n[OK] All data collection completed!")
         print("[INFO] Closing browser...")
         self.cleanup()
         
-        # Create Excel file after browser is closed
         print("\n" + "="*60)
         print("[INFO] Creating Excel file with all sheets...")
         print("="*60)
         
-        # Finalize Excel file with first 3 sheets (ASET, Kredit, DPK)
-        # Use excel_year (from input field) for Excel labeling to ensure correct year
         self._finalize_excel(month, excel_year)
-        
-        # Finalize Excel file with Sheet 4 (Laba Kotor)
         self._finalize_excel_laba_kotor(month, excel_year)
-        
-        # Finalize Excel file with Sheet 5 (Rasio) - 9 tables
         print("\n" + "="*60)
         print("[INFO] Starting Sheet 5: Rasio (9 tables)")
         print("="*60)
         self._finalize_excel_rasio(month, excel_year)
         
         print("\n[OK] Excel file created successfully!")
+    
+    def run_all_phases(self, month: str = None, year: str = None):
+        """
+        Run all 3 phases sequentially, each with its own Chrome session.
+        This is the main entry point for the 3-phase scraping approach.
+        
+        Args:
+            month: Month to select (e.g., "Desember"). If None, auto-detects based on current date.
+            year: Year to select (e.g., "2024"). If None, auto-detects based on current date.
+        """
+        # Auto-detect month and year if not provided
+        if month is None or year is None:
+            detected_month, detected_year = self._get_target_month_year()
+            month = month or detected_month
+            year = year or detected_year
+        
+        print("\n" + "="*60)
+        print("[ORCHESTRATOR] Starting 3-phase scraping process")
+        print(f"[ORCHESTRATOR] Target: {month} {year}")
+        print("="*60)
+        
+        # Phase 001: Sheets 1-3 (ASET, Kredit, DPK)
+        print("\n" + "="*60)
+        print("[ORCHESTRATOR] Phase 001: Starting...")
+        print("="*60)
+        self.scrape_all_data(month=month, year=year, phase='001')
+        print("\n[ORCHESTRATOR] Phase 001: Completed")
+        
+        # Phase 002: Sheet 4 (Laba Kotor)
+        print("\n" + "="*60)
+        print("[ORCHESTRATOR] Phase 002: Starting...")
+        print("="*60)
+        self.scrape_all_data(month=month, year=year, phase='002')
+        print("\n[ORCHESTRATOR] Phase 002: Completed")
+        
+        # Phase 003: Sheet 5 (Rasio)
+        print("\n" + "="*60)
+        print("[ORCHESTRATOR] Phase 003: Starting...")
+        print("="*60)
+        self.scrape_all_data(month=month, year=year, phase='003')
+        print("\n[ORCHESTRATOR] Phase 003: Completed")
+        
+        print("\n" + "="*60)
+        print("[ORCHESTRATOR] All phases completed successfully!")
+        print("="*60)
     
     def _select_initial_dropdowns_and_checkboxes(self):
         """
@@ -975,6 +1138,130 @@ class OJKExtJSScraper:
                 print(f"  [WARNING] Could not check {treeview_id}: {e}")
         
         print("  [OK] Checkbox changes completed")
+    
+    def _select_checkbox_002_only(self):
+        """
+        Select only checkbox 002 (Laba Kotor).
+        Uncheck checkboxes 001 and 003 to ensure only 002 is checked.
+        
+        NOTE: This function ONLY changes checkboxes. It does NOT touch month/year selection.
+        """
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        
+        print("\n[INFO] Setting up checkbox 002 only (Laba Kotor)...")
+        print("[INFO] NOTE: Month and year remain unchanged - only checkboxes are being modified")
+        
+        # List of all checkboxes to manage
+        treeview_ids = {
+            "001": "treeview-1012-record-BPK-901-000001",
+            "002": "treeview-1012-record-BPK-901-000002",
+            "003": "treeview-1012-record-BPK-901-000003"
+        }
+        
+        # Uncheck 001 and 003, ensure 002 is checked
+        for checkbox_id, treeview_id in treeview_ids.items():
+            try:
+                wait = WebDriverWait(self.driver, 10)
+                treeview_element = wait.until(
+                    EC.presence_of_element_located((By.ID, treeview_id))
+                )
+                
+                # Find checkboxes
+                checkboxes = treeview_element.find_elements(By.XPATH, ".//*[contains(@class, 'x-tree-checkbox') or contains(@class, 'tree-checkbox') or @role='checkbox' or @type='checkbox']")
+                if not checkboxes:
+                    checkboxes = treeview_element.find_elements(By.XPATH, ".//*[@aria-checked]")
+                
+                if checkboxes:
+                    checkbox = checkboxes[0]
+                    aria_checked = checkbox.get_attribute("aria-checked")
+                    
+                    if checkbox_id == "002":
+                        # Ensure 002 is checked
+                        if aria_checked != "true":
+                            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", checkbox)
+                            time.sleep(1.125)
+                            self.driver.execute_script("arguments[0].click();", checkbox)
+                            print(f"  [OK] Checked: {treeview_id}")
+                            time.sleep(1.125)
+                        else:
+                            print(f"  [INFO] Already checked: {treeview_id}")
+                    else:
+                        # Uncheck 001 and 003
+                        if aria_checked == "true":
+                            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", checkbox)
+                            time.sleep(1.125)
+                            self.driver.execute_script("arguments[0].click();", checkbox)
+                            print(f"  [OK] Unchecked: {treeview_id}")
+                            time.sleep(1.125)
+                        else:
+                            print(f"  [INFO] Already unchecked: {treeview_id}")
+            except Exception as e:
+                print(f"  [WARNING] Could not manage {treeview_id}: {e}")
+        
+        print("  [OK] Checkbox 002 only setup completed")
+    
+    def _select_checkbox_003_only(self):
+        """
+        Select only checkbox 003 (Rasio).
+        Uncheck checkboxes 001 and 002 to ensure only 003 is checked.
+        
+        NOTE: This function ONLY changes checkboxes. It does NOT touch month/year selection.
+        """
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        
+        print("\n[INFO] Setting up checkbox 003 only (Rasio)...")
+        print("[INFO] NOTE: Month and year remain unchanged - only checkboxes are being modified")
+        
+        # List of all checkboxes to manage
+        treeview_ids = {
+            "001": "treeview-1012-record-BPK-901-000001",
+            "002": "treeview-1012-record-BPK-901-000002",
+            "003": "treeview-1012-record-BPK-901-000003"
+        }
+        
+        # Uncheck 001 and 002, ensure 003 is checked
+        for checkbox_id, treeview_id in treeview_ids.items():
+            try:
+                wait = WebDriverWait(self.driver, 10)
+                treeview_element = wait.until(
+                    EC.presence_of_element_located((By.ID, treeview_id))
+                )
+                
+                # Find checkboxes
+                checkboxes = treeview_element.find_elements(By.XPATH, ".//*[contains(@class, 'x-tree-checkbox') or contains(@class, 'tree-checkbox') or @role='checkbox' or @type='checkbox']")
+                if not checkboxes:
+                    checkboxes = treeview_element.find_elements(By.XPATH, ".//*[@aria-checked]")
+                
+                if checkboxes:
+                    checkbox = checkboxes[0]
+                    aria_checked = checkbox.get_attribute("aria-checked")
+                    
+                    if checkbox_id == "003":
+                        # Ensure 003 is checked
+                        if aria_checked != "true":
+                            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", checkbox)
+                            time.sleep(1.125)
+                            self.driver.execute_script("arguments[0].click();", checkbox)
+                            print(f"  [OK] Checked: {treeview_id}")
+                            time.sleep(1.125)
+                        else:
+                            print(f"  [INFO] Already checked: {treeview_id}")
+                    else:
+                        # Uncheck 001 and 002
+                        if aria_checked == "true":
+                            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", checkbox)
+                            time.sleep(1.125)
+                            self.driver.execute_script("arguments[0].click();", checkbox)
+                            print(f"  [OK] Unchecked: {treeview_id}")
+                            time.sleep(1.125)
+                        else:
+                            print(f"  [INFO] Already unchecked: {treeview_id}")
+            except Exception as e:
+                print(f"  [WARNING] Could not manage {treeview_id}: {e}")
+        
+        print("  [OK] Checkbox 003 only setup completed")
     
     def _get_city_by_index(self, index: int) -> str:
         """Get city name by index from dropdown ext-gen1064. Returns city name or None if not found."""
@@ -1344,7 +1631,7 @@ class OJKExtJSScraper:
         
         return None
     
-    def _click_tampilkan_and_extract_data(self, year: str, city: str, bank: str, extract_mode: str = 'sheets_1_3') -> dict:
+    def _click_tampilkan_and_extract_data(self, year: str, city: str, bank: str, extract_mode: str = 'sheets_1_3', skip_laba_kotor: bool = False, skip_rasio: bool = False) -> dict:
         """
         Click Tampilkan button, wait for report, and extract data
         
@@ -1353,6 +1640,8 @@ class OJKExtJSScraper:
             city: City name
             bank: Bank name
             extract_mode: 'sheets_1_3' to extract ASET/KREDIT/DPK, 'sheets_4_5' to extract LABA KOTOR/RASIO
+            skip_laba_kotor: If True, skip Laba Kotor extraction (for phase 003)
+            skip_rasio: If True, skip Rasio extraction (for phase 002)
         """
         try:
             # Make sure we're on default content and close any open dropdowns
@@ -1401,7 +1690,7 @@ class OJKExtJSScraper:
             # Extract data with Bad Request retry logic (up to 2 retries)
             max_retries = 2
             for retry_attempt in range(max_retries + 1):
-                extracted_data = self._extract_report_data(year, city, bank, extract_mode=extract_mode, skip_wait_attempts=skip_wait)
+                extracted_data = self._extract_report_data(year, city, bank, extract_mode=extract_mode, skip_wait_attempts=skip_wait, skip_laba_kotor=skip_laba_kotor, skip_rasio=skip_rasio)
                 
                 # Check if Bad Request was detected (extracted_data is None)
                 if extracted_data is None:
@@ -2283,7 +2572,7 @@ class OJKExtJSScraper:
         print(f"    [DEBUG] Wait completed. Found identifiers: {found_identifiers}")
         return True
     
-    def _extract_report_data(self, selected_year: str, city: str = None, bank: str = None, extract_mode: str = 'sheets_1_3', skip_wait_attempts: bool = False) -> dict:
+    def _extract_report_data(self, selected_year: str, city: str = None, bank: str = None, extract_mode: str = 'sheets_1_3', skip_wait_attempts: bool = False, skip_laba_kotor: bool = False, skip_rasio: bool = False) -> dict:
         """
         Extract financial data from the generated report
         
@@ -2292,6 +2581,9 @@ class OJKExtJSScraper:
             city: The selected city (optional, will try to extract from page if not provided)
             bank: The selected bank (optional, will try to extract from page if not provided)
             extract_mode: 'sheets_1_3' to extract ASET/KREDIT/DPK, 'sheets_4_5' to extract LABA KOTOR/RASIO only
+            skip_wait_attempts: If True, skip wait attempts (used when period error was handled)
+            skip_laba_kotor: If True, skip Laba Kotor extraction (for phase 003)
+            skip_rasio: If True, skip Rasio extraction (for phase 002)
             
         Returns:
             Dictionary with extracted data
@@ -3202,163 +3494,176 @@ class OJKExtJSScraper:
                             print(f"    [DEBUG] Identifier '{identifier_text}' not found in any div element")
                         return 0.0
                     
-                    # Extract Laba Kotor (for Sheet 4)
-                    laba_kotor_current, laba_kotor_previous = extract_laba_kotor_value(laba_kotor_identifier)
-                    # Swap years: 2025 should be in 2024 column, 2024 should be in 2025 column
-                    result[f'Laba Kotor {selected_year}'] = laba_kotor_previous  # Swap: put previous year value in current year column
-                    result[f'Laba Kotor {previous_year}'] = laba_kotor_current   # Swap: put current year value in previous year column
-                    print(f"    [OK] Extracted Laba Kotor: {selected_year}={laba_kotor_previous}, {previous_year}={laba_kotor_current} (swapped)")
-                    
-                    # Extract all 9 ratios (for Sheet 5) - from second iframe
-                    print("    [INFO] Switching to second iframe for ratio extraction...")
-                    self.driver.switch_to.default_content()
-                    iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
-                    ratio_iframe = None
-                    ratio_soup = None
-                    
-                    if len(iframes) >= 2:
-                        # Use the second iframe (index 1) for ratios
-                        try:
-                            self.driver.switch_to.frame(iframes[1])
-                            ratio_page_source = self.driver.page_source
-                            ratio_soup = BeautifulSoup(ratio_page_source, 'html.parser')
-                            ratio_iframe = iframes[1]
-                            print(f"    [OK] Switched to second iframe (index 1) for ratio extraction")
-                        except Exception as e:
-                            print(f"    [WARNING] Could not switch to second iframe: {e}")
-                            # Fallback: use current soup
-                            ratio_soup = soup
+                    # Extract Laba Kotor (for Sheet 4) - skip if skip_laba_kotor is True
+                    if not skip_laba_kotor:
+                        laba_kotor_current, laba_kotor_previous = extract_laba_kotor_value(laba_kotor_identifier)
+                        # Swap years: 2025 should be in 2024 column, 2024 should be in 2025 column
+                        result[f'Laba Kotor {selected_year}'] = laba_kotor_previous  # Swap: put previous year value in current year column
+                        result[f'Laba Kotor {previous_year}'] = laba_kotor_current   # Swap: put current year value in previous year column
+                        print(f"    [OK] Extracted Laba Kotor: {selected_year}={laba_kotor_previous}, {previous_year}={laba_kotor_current} (swapped)")
                     else:
-                        print(f"    [WARNING] Only {len(iframes)} iframe(s) found, expected at least 2. Using current iframe for ratios.")
-                        ratio_soup = soup
+                        print(f"    [INFO] Skipping Laba Kotor extraction (skip_laba_kotor=True)")
+                        result[f'Laba Kotor {selected_year}'] = 0
+                        result[f'Laba Kotor {previous_year}'] = 0
                     
-                    # Update extract_ratio_value to use ratio_soup instead of soup
-                    def extract_ratio_value_from_soup(identifier_text: str, soup_to_use: BeautifulSoup) -> float:
-                        """
-                        Extract Rasio value from table structure using provided soup.
-                        After finding identifier in <td>, check each sibling <td>:
-                        - If <td> has no <div> child, skip to next <td>
-                        - If <td> has <div> child, extract text and check if it's a number with decimal point
-                        """
-                        import re
-                        print(f"    [DEBUG] Searching for ratio identifier: '{identifier_text}'")
-                        found_identifier = False
-                        for div in soup_to_use.find_all('div'):
-                            text = div.get_text(strip=True)
-                            if identifier_text.upper() in text.upper() and len(text) < 5000:
-                                found_identifier = True
-                                # Find the parent <td> element
-                                parent_td = div.find_parent('td')
-                                if not parent_td:
-                                    continue
-                                
-                                # Find the parent <tr> (table row) to get all <td> elements
-                                parent_tr = parent_td.find_parent('tr')
-                                if not parent_tr:
-                                    continue
-                                
-                                # Get all <td> elements in the row
-                                tds = parent_tr.find_all('td')
-                                
-                                # Find the index of the identifier <td>
-                                try:
-                                    identifier_td_index = tds.index(parent_td)
-                                except:
-                                    continue
-                                
-                                print(f"    [DEBUG] Found identifier '{identifier_text}' at td index {identifier_td_index}, checking next tds...")
-                                
-                                # Check each sibling <td> after the identifier
-                                for td_idx, td in enumerate(tds[identifier_td_index + 1:identifier_td_index + 30], start=identifier_td_index + 1):  # Check up to 30 <td> elements
-                                    # Check if this <td> has a <div> child
-                                    td_div = td.find('div', recursive=False)  # Only direct child, not nested
-                                    if not td_div:
-                                        # Try to find any div (including nested)
-                                        td_div = td.find('div')
-                                    
-                                    if not td_div:
-                                        # No div found in this td, skip to next
-                                        print(f"    [DEBUG]   td[{td_idx}]: no div child, skipping")
+                    # Extract all 9 ratios (for Sheet 5) - from second iframe - skip if skip_rasio is True
+                    if not skip_rasio:
+                        print("    [INFO] Switching to second iframe for ratio extraction...")
+                        self.driver.switch_to.default_content()
+                        iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
+                        ratio_iframe = None
+                        ratio_soup = None
+                        
+                        if len(iframes) >= 2:
+                            # Use the second iframe (index 1) for ratios
+                            try:
+                                self.driver.switch_to.frame(iframes[1])
+                                ratio_page_source = self.driver.page_source
+                                ratio_soup = BeautifulSoup(ratio_page_source, 'html.parser')
+                                ratio_iframe = iframes[1]
+                                print(f"    [OK] Switched to second iframe (index 1) for ratio extraction")
+                            except Exception as e:
+                                print(f"    [WARNING] Could not switch to second iframe: {e}")
+                                # Fallback: use current soup
+                                ratio_soup = soup
+                        else:
+                            print(f"    [WARNING] Only {len(iframes)} iframe(s) found, expected at least 2. Using current iframe for ratios.")
+                            ratio_soup = soup
+                        
+                        # Update extract_ratio_value to use ratio_soup instead of soup
+                        def extract_ratio_value_from_soup(identifier_text: str, soup_to_use: BeautifulSoup) -> float:
+                            """
+                            Extract Rasio value from table structure using provided soup.
+                            After finding identifier in <td>, check each sibling <td>:
+                            - If <td> has no <div> child, skip to next <td>
+                            - If <td> has <div> child, extract text and check if it's a number with decimal point
+                            """
+                            import re
+                            print(f"    [DEBUG] Searching for ratio identifier: '{identifier_text}'")
+                            found_identifier = False
+                            for div in soup_to_use.find_all('div'):
+                                text = div.get_text(strip=True)
+                                if identifier_text.upper() in text.upper() and len(text) < 5000:
+                                    found_identifier = True
+                                    # Find the parent <td> element
+                                    parent_td = div.find_parent('td')
+                                    if not parent_td:
                                         continue
                                     
-                                    # Get text from the <div>
-                                    div_text = td_div.get_text(strip=True)
-                                    
-                                    # Remove &nbsp; entities and check if empty
-                                    div_text_clean = div_text.replace('\xa0', ' ').replace('&nbsp;', ' ').strip()
-                                    
-                                    print(f"    [DEBUG]   td[{td_idx}]: found div with text='{div_text_clean[:50]}'")
-                                    
-                                    # Skip if empty or only whitespace
-                                    if not div_text_clean or div_text_clean == '':
-                                        print(f"    [DEBUG]   td[{td_idx}]: div text is empty, skipping")
+                                    # Find the parent <tr> (table row) to get all <td> elements
+                                    parent_tr = parent_td.find_parent('tr')
+                                    if not parent_tr:
                                         continue
                                     
-                                    # Try to extract number - check if it's a valid numeric text
-                                    # Remove spaces and try to parse
-                                    cleaned_text = div_text_clean.replace(' ', '').replace(',', '.')
+                                    # Get all <td> elements in the row
+                                    tds = parent_tr.find_all('td')
                                     
-                                    # Check for negative (in parentheses)
-                                    is_negative = False
-                                    if cleaned_text.startswith('(') and cleaned_text.endswith(')'):
-                                        is_negative = True
-                                        cleaned_text = cleaned_text[1:-1].strip()
-                                    elif cleaned_text.startswith('-'):
-                                        is_negative = True
-                                        cleaned_text = cleaned_text[1:].strip()
-                                    
-                                    # Try to parse as float - if it's a valid number like 0.33 or 3.25
+                                    # Find the index of the identifier <td>
                                     try:
-                                        number = float(cleaned_text)
-                                        if is_negative:
-                                            number = -number
-                                        # Reasonable range check
-                                        if abs(number) < 1e15:
-                                            print(f"    [DEBUG] Found {identifier_text} ratio value at td index {td_idx}: {number}")
-                                            return number
-                                    except ValueError:
-                                        # Not a valid number, skip to next td
-                                        print(f"    [DEBUG]   td[{td_idx}]: '{cleaned_text[:30]}' is not a valid number, skipping")
-                                        pass
-                                
-                                print(f"    [DEBUG] No ratio value found for '{identifier_text}' after checking {min(30, len(tds) - identifier_td_index - 1)} tds")
-                        if not found_identifier:
-                            print(f"    [DEBUG] Identifier '{identifier_text}' not found in any div element")
-                        return 0.0
-                    
-                    ratio_identifiers = [
-                        ("Kewajiban Penyediaan Modal Minimum (KPMM)", "KPMM"),
-                        ("Rasio Cadangan terhadap PPKA", "PPKA"),
-                        ("Non Performing Loan (NPL) Neto", "NPL Neto"),
-                        ("Non Performing Loan (NPL) Gross", "NPL Gross"),
-                        ("Return on Assets (ROA)", "ROA"),
-                        ("Biaya Operasional terhadap Pendapatan Operasional (BOPO)", "BOPO"),
-                        ("Net Interest Margin (NIM)", "NIM"),
-                        ("Loan to Deposit Ratio (LDR)", "LDR"),
-                        ("Cash Ratio", "CR")
-                    ]
-                    
-                    for identifier, ratio_name in ratio_identifiers:
-                        value = extract_ratio_value_from_soup(identifier, ratio_soup)
-                        result[ratio_name] = value
-                        print(f"    [DEBUG] Extracted {ratio_name}: {value}")
-                    
-                    # Switch back to first iframe (or default content) after ratio extraction
-                    if ratio_iframe:
-                        try:
-                            self.driver.switch_to.default_content()
-                            if report_iframe:
-                                self.driver.switch_to.frame(report_iframe)
-                            print("    [DEBUG] Switched back to first iframe after ratio extraction")
-                        except:
-                            self.driver.switch_to.default_content()
+                                        identifier_td_index = tds.index(parent_td)
+                                    except:
+                                        continue
+                                    
+                                    print(f"    [DEBUG] Found identifier '{identifier_text}' at td index {identifier_td_index}, checking next tds...")
+                                    
+                                    # Check each sibling <td> after the identifier
+                                    for td_idx, td in enumerate(tds[identifier_td_index + 1:identifier_td_index + 30], start=identifier_td_index + 1):  # Check up to 30 <td> elements
+                                        # Check if this <td> has a <div> child
+                                        td_div = td.find('div', recursive=False)  # Only direct child, not nested
+                                        if not td_div:
+                                            # Try to find any div (including nested)
+                                            td_div = td.find('div')
+                                        
+                                        if not td_div:
+                                            # No div found in this td, skip to next
+                                            print(f"    [DEBUG]   td[{td_idx}]: no div child, skipping")
+                                            continue
+                                        
+                                        # Get text from the <div>
+                                        div_text = td_div.get_text(strip=True)
+                                        
+                                        # Remove &nbsp; entities and check if empty
+                                        div_text_clean = div_text.replace('\xa0', ' ').replace('&nbsp;', ' ').strip()
+                                        
+                                        print(f"    [DEBUG]   td[{td_idx}]: found div with text='{div_text_clean[:50]}'")
+                                        
+                                        # Skip if empty or only whitespace
+                                        if not div_text_clean or div_text_clean == '':
+                                            print(f"    [DEBUG]   td[{td_idx}]: div text is empty, skipping")
+                                            continue
+                                        
+                                        # Try to extract number - check if it's a valid numeric text
+                                        # Remove spaces and try to parse
+                                        cleaned_text = div_text_clean.replace(' ', '').replace(',', '.')
+                                        
+                                        # Check for negative (in parentheses)
+                                        is_negative = False
+                                        if cleaned_text.startswith('(') and cleaned_text.endswith(')'):
+                                            is_negative = True
+                                            cleaned_text = cleaned_text[1:-1].strip()
+                                        elif cleaned_text.startswith('-'):
+                                            is_negative = True
+                                            cleaned_text = cleaned_text[1:].strip()
+                                        
+                                        # Try to parse as float - if it's a valid number like 0.33 or 3.25
+                                        try:
+                                            number = float(cleaned_text)
+                                            if is_negative:
+                                                number = -number
+                                            # Reasonable range check
+                                            if abs(number) < 1e15:
+                                                print(f"    [DEBUG] Found {identifier_text} ratio value at td index {td_idx}: {number}")
+                                                return number
+                                        except ValueError:
+                                            # Not a valid number, skip to next td
+                                            print(f"    [DEBUG]   td[{td_idx}]: '{cleaned_text[:30]}' is not a valid number, skipping")
+                                            pass
+                                    
+                                    print(f"    [DEBUG] No ratio value found for '{identifier_text}' after checking {min(30, len(tds) - identifier_td_index - 1)} tds")
+                            if not found_identifier:
+                                print(f"    [DEBUG] Identifier '{identifier_text}' not found in any div element")
+                            return 0.0
+                        
+                        ratio_identifiers = [
+                            ("Kewajiban Penyediaan Modal Minimum (KPMM)", "KPMM"),
+                            ("Rasio Cadangan terhadap PPKA", "PPKA"),
+                            ("Non Performing Loan (NPL) Neto", "NPL Neto"),
+                            ("Non Performing Loan (NPL) Gross", "NPL Gross"),
+                            ("Return on Assets (ROA)", "ROA"),
+                            ("Biaya Operasional terhadap Pendapatan Operasional (BOPO)", "BOPO"),
+                            ("Net Interest Margin (NIM)", "NIM"),
+                            ("Loan to Deposit Ratio (LDR)", "LDR"),
+                            ("Cash Ratio", "CR")
+                        ]
+                        
+                        for identifier, ratio_name in ratio_identifiers:
+                            value = extract_ratio_value_from_soup(identifier, ratio_soup)
+                            result[ratio_name] = value
+                            print(f"    [DEBUG] Extracted {ratio_name}: {value}")
+                        
+                        # Switch back to first iframe (or default content) after ratio extraction
+                        if ratio_iframe:
+                            try:
+                                self.driver.switch_to.default_content()
+                                if report_iframe:
+                                    self.driver.switch_to.frame(report_iframe)
+                                print("    [DEBUG] Switched back to first iframe after ratio extraction")
+                            except:
+                                self.driver.switch_to.default_content()
+                    else:
+                        print(f"    [INFO] Skipping Rasio extraction (skip_rasio=True)")
+                        ratio_names = ['KPMM', 'PPKA', 'NPL Neto', 'NPL Gross', 'ROA', 'BOPO', 'NIM', 'LDR', 'CR']
+                        for ratio_name in ratio_names:
+                            result[ratio_name] = 0
                 else:
                     # No ratio data found, set defaults
-                    result[f'Laba Kotor {selected_year}'] = 0
-                    result[f'Laba Kotor {previous_year}'] = 0
-                    ratio_names = ['KPMM', 'PPKA', 'NPL Neto', 'NPL Gross', 'ROA', 'BOPO', 'NIM', 'LDR', 'CR']
-                    for ratio_name in ratio_names:
-                        result[ratio_name] = 0
+                    if not skip_laba_kotor:
+                        result[f'Laba Kotor {selected_year}'] = 0
+                        result[f'Laba Kotor {previous_year}'] = 0
+                    if not skip_rasio:
+                        ratio_names = ['KPMM', 'PPKA', 'NPL Neto', 'NPL Gross', 'ROA', 'BOPO', 'NIM', 'LDR', 'CR']
+                        for ratio_name in ratio_names:
+                            result[ratio_name] = 0
             
             print(f"    [OK] Total extracted data points: {len(result)}")
             
