@@ -1,7 +1,7 @@
 """
-Scheduled runner for OJK Scraper
-Runs the scraper and saves output to specified directory
-Designed to be run by Windows Task Scheduler
+Manual runner for OJK Scraper
+Runs the scraper once and saves output to specified directory
+Use this for manual testing or one-time execution
 """
 
 import sys
@@ -38,12 +38,12 @@ logger = logging.getLogger(__name__)
 
 
 def main():
-    """Main function for scheduled runs"""
+    """Main function for manual runs"""
     # Target output directory
     target_output_dir = Path(r"D:\APP\OSS\client\assets\publikasi")
     
     logger.info("=" * 60)
-    logger.info("OJK Scraper - Scheduled Run")
+    logger.info("OJK Scraper - Manual Run")
     logger.info(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info(f"Target output directory: {target_output_dir}")
     logger.info("=" * 60)
@@ -58,7 +58,7 @@ def main():
     
     scraper = None
     try:
-        # Initialize scraper with headless mode for scheduled runs
+        # Initialize scraper with headless mode for manual runs
         logger.info("[INFO] Initializing scraper...")
         scraper = OJKExtJSScraper(headless=True)
         
@@ -76,7 +76,7 @@ def main():
         scraper.run_all_phases()
         
         logger.info("=" * 60)
-        logger.info("[OK] Scheduled run completed successfully!")
+        logger.info("[OK] Manual run completed successfully!")
         logger.info(f"Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         logger.info(f"Output saved to: {target_output_dir}")
         logger.info("=" * 60)
@@ -84,7 +84,7 @@ def main():
         return 0
         
     except Exception as e:
-        logger.error(f"[ERROR] Scheduled run failed: {e}")
+        logger.error(f"[ERROR] Manual run failed: {e}")
         import traceback
         logger.error(traceback.format_exc())
         return 1

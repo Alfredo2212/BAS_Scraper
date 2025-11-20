@@ -11,13 +11,31 @@ D:\APP\OSS\client\assets\publikasi
 
 ## Files
 
-- **`scheduled_runner.py`**: Main script that runs the scraper (called by Task Scheduler)
-- **`setup_scheduler.bat`**: Batch script to set up Windows Task Scheduler (Command Prompt)
-- **`setup_scheduler.ps1`**: PowerShell script to set up Windows Task Scheduler (PowerShell)
+- **`scheduler_service.py`**: Continuous scheduler service (recommended) - runs in background, automatically executes on schedule
+- **`manual_runner.py`**: Manual one-time runner - use for testing or manual execution
+- **`setup_scheduler.bat`**: Batch script to set up Windows Task Scheduler (alternative method)
+- **`setup_scheduler.ps1`**: PowerShell script to set up Windows Task Scheduler (alternative method)
 
 ## Setup Instructions
 
-### Option 1: Using PowerShell (Recommended)
+### Option 1: Continuous Scheduler Service (Recommended)
+
+The **`scheduler_service.py`** runs continuously in the background and automatically executes the scraper on schedule. This is the recommended approach.
+
+1. Start the scheduler service from your `start_server.bat` (already configured)
+2. Or run manually:
+   ```cmd
+   python scheduler_service.py
+   ```
+3. The service will run continuously and execute automatically on Tuesday and Thursday at 15:00 (GMT+7)
+
+**Note:** The scheduler service is started automatically when you run `start_server.bat`
+
+### Option 2: Windows Task Scheduler (Alternative)
+
+If you prefer using Windows Task Scheduler instead of the continuous service:
+
+#### Using PowerShell (Recommended)
 
 1. Open PowerShell as **Administrator**
 2. Navigate to the project directory:
@@ -29,7 +47,7 @@ D:\APP\OSS\client\assets\publikasi
    .\setup_scheduler.ps1
    ```
 
-### Option 2: Using Command Prompt
+#### Using Command Prompt
 
 1. Open Command Prompt as **Administrator**
 2. Navigate to the project directory:
@@ -74,24 +92,21 @@ schtasks /query /tn "OJK_Publikasi_Scraper_Thursday"
 
 ## Manual Test Run
 
-To test the scheduled runner manually:
-
-```powershell
-python scheduled_runner.py
-```
-
-Or:
+To run the scraper manually (one-time execution):
 
 ```cmd
-python scheduled_runner.py
+python manual_runner.py
 ```
+
+This will run the scraper once and exit. Useful for testing or manual data collection.
 
 ## View Logs
 
-Log files are created in the `logs` directory with the format:
-```
-logs/scheduled_run_YYYYMMDD_HHMMSS.log
-```
+**For scheduler service:**
+- Log file: `logs/scheduler.log` (single file, appends all runs)
+
+**For manual runner:**
+- Log files: `logs/scheduled_run_YYYYMMDD_HHMMSS.log` (one file per run)
 
 ## Remove Scheduled Tasks
 

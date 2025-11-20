@@ -3510,28 +3510,29 @@ class OJKExtJSScraper:
                         result[f'Laba Kotor {selected_year}'] = 0
                         result[f'Laba Kotor {previous_year}'] = 0
                     
-                    # Extract all 9 ratios (for Sheet 5) - from second iframe - skip if skip_rasio is True
+                    # Extract all 9 ratios (for Sheet 5) - from iframe (1 iframe per checkbox) - skip if skip_rasio is True
                     if not skip_rasio:
-                        print("    [INFO] Switching to second iframe for ratio extraction...")
+                        print("    [INFO] Switching to iframe for ratio extraction...")
                         self.driver.switch_to.default_content()
                         iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
                         ratio_iframe = None
                         ratio_soup = None
                         
-                        if len(iframes) >= 2:
-                            # Use the second iframe (index 1) for ratios
+                        if iframes:
+                            # Use the first (and only) iframe for ratios (1 iframe per checkbox)
                             try:
-                                self.driver.switch_to.frame(iframes[1])
+                                self.driver.switch_to.frame(iframes[0])
                                 ratio_page_source = self.driver.page_source
                                 ratio_soup = BeautifulSoup(ratio_page_source, 'html.parser')
-                                ratio_iframe = iframes[1]
-                                print(f"    [OK] Switched to second iframe (index 1) for ratio extraction")
+                                ratio_iframe = iframes[0]
+                                print(f"    [OK] Switched to iframe for ratio extraction")
                             except Exception as e:
-                                print(f"    [WARNING] Could not switch to second iframe: {e}")
+                                print(f"    [WARNING] Could not switch to iframe: {e}")
                                 # Fallback: use current soup
                                 ratio_soup = soup
                         else:
-                            print(f"    [WARNING] Only {len(iframes)} iframe(s) found, expected at least 2. Using current iframe for ratios.")
+                            # No iframes found, use current soup (main page)
+                            print(f"    [WARNING] No iframes found, using current page source for ratios.")
                             ratio_soup = soup
                         
                         # Update extract_ratio_value to use ratio_soup instead of soup
