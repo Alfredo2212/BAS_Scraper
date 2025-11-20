@@ -2425,8 +2425,12 @@ class OJKExtJSScraper:
                     current_row += 50  # Reserve space for next table
                     continue
                 
-                # Sort by ratio value (descending)
-                ratio_data.sort(key=lambda x: x.get(ratio_key, 0), reverse=True)
+                # Sort by ratio value
+                # NPL Neto, NPL Gross, and BOPO should be sorted ascending (lower is better)
+                # Other ratios should be sorted descending (higher is better)
+                ascending_ratios = ['NPL Neto', 'NPL Gross', 'BOPO']
+                reverse_sort = ratio_key not in ascending_ratios
+                ratio_data.sort(key=lambda x: x.get(ratio_key, 0), reverse=reverse_sort)
                 
                 # Table header (row current_row)
                 headers = ['No', 'Nama Bank', 'Lokasi', ratio_name]
