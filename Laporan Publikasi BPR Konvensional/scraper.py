@@ -2350,6 +2350,66 @@ class OJKExtJSScraper:
                 pass
             return
         
+        # Deduplicate records by bank + city
+        # If duplicates exist, keep the one with non-zero ratio values (prefer real data over 0,00)
+        original_count = len(data_to_use)
+        print(f"  [INFO] Deduplicating records (before: {original_count} records)...")
+        seen_banks = {}
+        deduplicated_data = []
+        ratio_names = ['KPMM', 'PPKA', 'NPL Neto', 'NPL Gross', 'ROA', 'BOPO', 'NIM', 'LDR', 'CR']
+        
+        for record in data_to_use:
+            bank_name = record.get('bank', '').strip()
+            city = record.get('city', '').strip()
+            bank_key = (bank_name, city)
+            
+            if bank_key not in seen_banks:
+                # First time seeing this bank, add it
+                seen_banks[bank_key] = record
+                deduplicated_data.append(record)
+            else:
+                # Duplicate found - check which one has better data (non-zero values)
+                existing_record = seen_banks[bank_key]
+                
+                # Count non-zero ratios in existing record
+                existing_non_zero_count = sum(
+                    1 for ratio in ratio_names 
+                    if existing_record.get(ratio, 0) != 0 and existing_record.get(ratio) is not None
+                )
+                
+                # Count non-zero ratios in new record
+                new_non_zero_count = sum(
+                    1 for ratio in ratio_names 
+                    if record.get(ratio, 0) != 0 and record.get(ratio) is not None
+                )
+                
+                # Replace existing if new record has more non-zero ratios
+                if new_non_zero_count > existing_non_zero_count:
+                    # Remove old record and add new one
+                    deduplicated_data.remove(existing_record)
+                    deduplicated_data.append(record)
+                    seen_banks[bank_key] = record
+                    print(f"  [INFO] Replaced duplicate record for {bank_name} ({city}) - new record has {new_non_zero_count} non-zero ratios vs {existing_non_zero_count}")
+                elif new_non_zero_count == existing_non_zero_count and new_non_zero_count > 0:
+                    # Same number of non-zero ratios - check if new record has any non-zero values where existing has zero
+                    should_replace = False
+                    for ratio in ratio_names:
+                        new_val = record.get(ratio, 0)
+                        existing_val = existing_record.get(ratio, 0)
+                        if new_val != 0 and existing_val == 0:
+                            should_replace = True
+                            break
+                    
+                    if should_replace:
+                        deduplicated_data.remove(existing_record)
+                        deduplicated_data.append(record)
+                        seen_banks[bank_key] = record
+                        print(f"  [INFO] Replaced duplicate record for {bank_name} ({city}) - new record has better ratio values")
+        
+        data_to_use = deduplicated_data
+        duplicates_removed = original_count - len(data_to_use)
+        print(f"  [OK] Deduplication complete (after: {len(data_to_use)} records, removed {duplicates_removed} duplicates)")
+        
         try:
             from openpyxl.styles import Font, Border, Side, Alignment
             from openpyxl import load_workbook
