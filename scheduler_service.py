@@ -23,6 +23,9 @@ scraper_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(scraper_module)
 OJKExtJSScraper = scraper_module.OJKExtJSScraper
 
+# Import shared execution function
+from scraper_runner import run_scraper_execution
+
 ### LOGGING SETUP ###
 log_dir = Path(__file__).parent / "logs"
 log_dir.mkdir(exist_ok=True)
@@ -45,62 +48,16 @@ def run_scraper_job():
     """
     Job function that runs the scraper
     Called by APScheduler at scheduled times
+    Uses shared execution function to ensure identical behavior with manual runner
     """
     target_output_dir = Path(r"D:\APP\OSS\client\assets\publikasi")
-    scraper = None
     
-    try:
-        logger.info("=" * 70)
-        logger.info("OJK Scraper - Scheduled Job Started")
-        logger.info(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        logger.info(f"Target output directory: {target_output_dir}")
-        logger.info("=" * 70)
-        
-        # Create target directory if it doesn't exist
-        try:
-            target_output_dir.mkdir(parents=True, exist_ok=True)
-            logger.info(f"[OK] Output directory ready: {target_output_dir}")
-        except Exception as e:
-            logger.error(f"[ERROR] Failed to create output directory: {e}")
-            return
-        
-        # Initialize scraper with headless mode for scheduled runs
-        logger.info("[INFO] Initializing scraper...")
-        scraper = OJKExtJSScraper(headless=True)
-        
-        # Override output directory
-        scraper.output_dir = target_output_dir
-        scraper.output_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(f"[OK] Output directory set to: {target_output_dir}")
-        
-        # Initialize and navigate
-        scraper.initialize()
-        scraper.navigate_to_page()
-        
-        # Run all phases
-        logger.info("[INFO] Starting 3-phase scraping process...")
-        scraper.run_all_phases()
-        
-        logger.info("=" * 70)
-        logger.info("[OK] Scheduled job completed successfully!")
-        logger.info(f"Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        logger.info(f"Output saved to: {target_output_dir}")
-        logger.info("=" * 70)
-        
-    except Exception as e:
-        logger.error(f"[ERROR] Scheduled job failed: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        
-    finally:
-        # Cleanup
-        if scraper:
-            try:
-                logger.info("[INFO] Cleaning up resources...")
-                scraper.cleanup(kill_processes=True)
-                logger.info("[OK] Cleanup completed")
-            except Exception as cleanup_error:
-                logger.error(f"[ERROR] Cleanup error: {cleanup_error}")
+    # Use shared execution function - ensures identical behavior with manual runner
+    run_scraper_execution(
+        scraper_class=OJKExtJSScraper,
+        target_output_dir=target_output_dir,
+        run_type="Scheduled Job"
+    )
 
 ### SCHEDULER SETUP ###
 def get_next_run_times(scheduler):
