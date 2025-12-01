@@ -653,6 +653,14 @@ class OJKExtJSScraper:
                     self._finalize_excel(month, excel_year)
                     self._finalize_excel_laba_kotor(month, excel_year)
                     self._finalize_excel_rasio(month, excel_year)
+                    
+                    # Retry banks with zero values using direct URL method
+                    print("")
+                    print("=" * 70)
+                    print("Starting retry for banks with zero values...")
+                    print("=" * 70)
+                    self._retry_zero_value_banks(month, excel_year)
+                    
                     print("[INFO] Closing browser...")
                     self.cleanup()
                     return
@@ -868,6 +876,10 @@ class OJKExtJSScraper:
                 print("="*60)
                 print("[INFO] Starting Sheet 5: Rasio (9 tables)")
                 self._finalize_excel_rasio(month, excel_year)
+                
+                # Note: Retry for zero values only runs after phase='all' completes
+                # (not for individual phases)
+                
                 print("\n[OK] Phase 003 completed successfully!")
                 return
         
@@ -886,6 +898,13 @@ class OJKExtJSScraper:
         print("[INFO] Starting Sheet 5: Rasio (9 tables)")
         print("="*60)
         self._finalize_excel_rasio(month, excel_year)
+        
+        # Retry banks with zero values using direct URL method
+        print("")
+        print("=" * 70)
+        print("Starting retry for banks with zero values...")
+        print("=" * 70)
+        self._retry_zero_value_banks(month, excel_year)
         
         print("\n[OK] Excel file created successfully!")
     
@@ -1812,7 +1831,7 @@ class OJKExtJSScraper:
     
     def _get_excel_filename(self, month: str, year: str) -> str:
         """
-        Generate Excel filename in format: Publikasi_MM_YY.xlsx
+        Generate Excel filename in format: Publikasi_MM_YYYY.xlsx
         e.g., Publikasi_09_2025.xlsx
         
         Args:
@@ -1823,6 +1842,8 @@ class OJKExtJSScraper:
             Filename string
         """
         month_num = self._get_month_number(month)
+        # month_num is already a string with zero-padding (e.g., "09")
+        # Just use it directly
         return f"Publikasi_{month_num}_{year}.xlsx"
     
     def _extract_bank_name(self, bank_full: str) -> str:
@@ -1949,7 +1970,10 @@ class OJKExtJSScraper:
             
             # Get filename using new format
             filename = self._get_excel_filename(month, year)
-            filepath = self.output_dir / filename
+            # Save to output/publikasi subdirectory
+            publikasi_dir = self.output_dir / "publikasi"
+            publikasi_dir.mkdir(parents=True, exist_ok=True)
+            filepath = publikasi_dir / filename
             
             # Check if file exists
             if filepath.exists():
@@ -2150,7 +2174,10 @@ class OJKExtJSScraper:
             
             # Get filename using new format
             filename = self._get_excel_filename(month, year)
-            filepath = self.output_dir / filename
+            # Save to output/publikasi subdirectory
+            publikasi_dir = self.output_dir / "publikasi"
+            publikasi_dir.mkdir(parents=True, exist_ok=True)
+            filepath = publikasi_dir / filename
             
             # Load existing workbook (should exist from Sheets 1-3)
             if not filepath.exists():
@@ -2416,7 +2443,10 @@ class OJKExtJSScraper:
             
             # Get filename using new format
             filename = self._get_excel_filename(month, year)
-            filepath = self.output_dir / filename
+            # Save to output/publikasi subdirectory
+            publikasi_dir = self.output_dir / "publikasi"
+            publikasi_dir.mkdir(parents=True, exist_ok=True)
+            filepath = publikasi_dir / filename
             
             if not filepath.exists():
                 print(f"  [ERROR] Excel file not found: {filepath}")
@@ -4082,6 +4112,1189 @@ class OJKExtJSScraper:
                     kill_chrome_processes()
                 except ImportError:
                     print("[WARNING] Tidak dapat mengimpor fungsi kill_chrome_processes")
+    
+    # ============================================================================
+    # Direct URL Retry Methods (for zero value banks)
+    # ============================================================================
+    
+    def _format_bank_code_for_url(self, bank_name: str) -> list:
+        """
+        Format bank name for URL with fallback options.
+        Returns a list of possible bank code formats to try.
+        
+        Similar to Sindikasi scraper - formats bank name for direct URL usage.
+        
+        Args:
+            bank_name: Bank name (e.g., "PT Bpr Rangkiang Aur Denai" or "Bprs Al-Makmur")
+            
+        Returns:
+            List of formatted bank codes: [original_format, expanded_format]
+            If no expansion needed, returns [original_format]
+        """
+        # Step 1: Replace "-" with spaces
+        name = bank_name.replace("-", " ")
+        
+        # Step 2: Split by spaces and clean
+        words = [w.strip() for w in name.split() if w.strip()]
+        
+        if not words:
+            return [""]
+        
+        # Step 3: Ensure name starts with "PT" or "Perumda"
+        first_word_upper = words[0].upper()
+        if first_word_upper not in ["PT", "PERUMDA"]:
+            # Prepend "PT" if it doesn't start with PT or Perumda
+            words.insert(0, "PT")
+        
+        # Step 4: Handle PERUMDA case (normalize to "Perumda")
+        if words[0].upper() == "PERUMDA":
+            words[0] = "Perumda"
+        
+        # Step 5: Create original format (keep Bpr/Bprs as-is)
+        # PT should always be uppercase, other words capitalized
+        original_words = []
+        for w in words:
+            if w.upper() == "PT":
+                original_words.append("PT")
+            else:
+                original_words.append(w.capitalize())
+        original_format = "+".join(original_words)
+        
+        # Step 6: Check if we need expanded format
+        has_bpr = False
+        has_bprs = False
+        expanded_words = []
+        
+        for word in words:
+            word_upper = word.upper()
+            if word_upper in ["BPR", "BPRS"]:
+                if word_upper == "BPRS":
+                    has_bprs = True
+                    expanded_words.extend(["Bank", "Perekonomian", "Rakyat", "Syariah"])
+                else:
+                    has_bpr = True
+                    expanded_words.extend(["Bank", "Perekonomian", "Rakyat"])
+            else:
+                expanded_words.append(word)
+        
+        # Step 7: Create expanded format if needed
+        formats = [original_format]
+        
+        if has_bpr or has_bprs:
+            # Capitalize expanded words, but keep PT uppercase
+            expanded_formatted = []
+            for w in expanded_words:
+                if w.upper() == "PT":
+                    expanded_formatted.append("PT")
+                else:
+                    expanded_formatted.append(w.capitalize())
+            expanded_format = "+".join(expanded_formatted)
+            formats.append(expanded_format)
+        
+        return formats
+    
+    def _month_name_to_number(self, month_name: str) -> int:
+        """
+        Convert month name to number (for direct URL)
+        
+        Args:
+            month_name: Month name (Maret, Juni, September, Desember)
+            
+        Returns:
+            Month number (3, 6, 9, or 12)
+        """
+        month_map = {
+            "Maret": 3,
+            "Juni": 6,
+            "September": 9,
+            "Desember": 12
+        }
+        return month_map.get(month_name, 3)  # Default to 3 if not found
+    
+    def _build_report_url(self, bank_code: str, month: int, year: str, form_number: int) -> str:
+        """
+        Build the report viewer URL for direct access
+        
+        Args:
+            bank_code: Formatted bank code (e.g., "PT+Bpr+Rangkiang+Aur+Denai")
+            month: Month number (3, 6, 9, or 12)
+            year: Year (e.g., "2025")
+            form_number: Form number (1, 2, or 3)
+            
+        Returns:
+            Complete URL string
+        """
+        base_url = "https://cfs.ojk.go.id/cfs/ReportViewerForm.aspx"
+        
+        # Form code for Konvensional
+        form_code = f"BPK-901-{form_number:06d}"
+        
+        # Build URL parameters
+        params = {
+            "BankCodeNumber": "620000",  # Static placeholder
+            "BankCode": bank_code,
+            "Month": str(month),
+            "Year": year,
+            "FinancialReportPeriodTypeCode": "R",
+            "FinancialReportTypeCode": form_code
+        }
+        
+        # Build query string
+        query_string = "&".join([f"{k}={v}" for k, v in params.items()])
+        url = f"{base_url}?{query_string}"
+        
+        return url
+    
+    def _check_for_server_error(self) -> bool:
+        """
+        Check if the current page has a server error
+        
+        Returns:
+            True if server error found, False otherwise
+        """
+        try:
+            page_source = self.driver.page_source
+            error_text = "Server Error in '/cfs' Application"
+            
+            if error_text in page_source:
+                print(f"  [WARNING] Server error detected in page source")
+                return True
+            
+            return False
+        except Exception as e:
+            print(f"  [WARNING] Error checking for server error: {e}")
+            return False
+    
+    def _get_page_source_with_iframe(self) -> tuple[str, object]:
+        """
+        Get page source, checking iframes first (similar to Sindikasi)
+        
+        Returns:
+            Tuple of (page_source: str, report_iframe: object or None)
+        """
+        # Try to find report in iframe first, then main page
+        iframes = self.driver.find_elements(By.TAG_NAME, "iframe")
+        page_source = None
+        report_iframe = None
+        
+        # Check iframes for report content
+        for iframe in iframes:
+            try:
+                self.driver.switch_to.frame(iframe)
+                iframe_source = self.driver.page_source
+                if ("Piutang" in iframe_source or "Aset" in iframe_source or "DPK" in iframe_source or
+                    "LABA" in iframe_source or "Rasio" in iframe_source or "KPMM" in iframe_source or
+                    "Kredit" in iframe_source):
+                    print(f"  [DEBUG] Found report content in iframe")
+                    page_source = iframe_source
+                    report_iframe = iframe
+                    break
+                self.driver.switch_to.default_content()
+            except:
+                self.driver.switch_to.default_content()
+                continue
+        
+        # If not in iframe, use main page
+        if page_source is None:
+            print(f"  [DEBUG] Using main page source")
+            self.driver.switch_to.default_content()
+            page_source = self.driver.page_source
+        
+        return page_source, report_iframe
+    
+    def _clean_numeric_text(self, text: str) -> float:
+        """
+        Clean numeric text by reversing . and , then parse as float
+        
+        Args:
+            text: Text containing numeric value (e.g., "230,115,190" becomes "230.115.190")
+            
+        Returns:
+            Parsed float value, or 0.0 if parsing fails
+        """
+        try:
+            import re
+            
+            # Remove whitespace
+            cleaned = text.strip()
+            
+            # Reverse . and , (swap all occurrences)
+            # "230,115,190" → "230.115.190"
+            # "230.115.190" → "230,115,190"
+            cleaned = cleaned.replace('.', 'TEMP_DOT')
+            cleaned = cleaned.replace(',', '.')
+            cleaned = cleaned.replace('TEMP_DOT', ',')
+            
+            # After swapping, parse the number
+            # Determine which separator is decimal and which is thousands
+            # Pattern: if there are multiple separators, the last one is usually decimal
+            # If only one separator, it could be either
+            
+            dot_count = cleaned.count('.')
+            comma_count = cleaned.count(',')
+            
+            if dot_count > 0 and comma_count > 0:
+                # Both present - last separator is decimal
+                last_dot_pos = cleaned.rfind('.')
+                last_comma_pos = cleaned.rfind(',')
+                
+                if last_dot_pos > last_comma_pos:
+                    # Last separator is dot, so dots are thousands, comma is decimal
+                    # Remove all dots (thousands), replace comma with dot for parsing
+                    cleaned = cleaned.replace('.', '')
+                    cleaned = cleaned.replace(',', '.')
+                else:
+                    # Last separator is comma, so commas are thousands, dot is decimal
+                    # Remove all commas (thousands), keep dot as decimal
+                    cleaned = cleaned.replace(',', '')
+            elif dot_count > 1:
+                # Multiple dots - all are thousands separators, remove all
+                cleaned = cleaned.replace('.', '')
+            elif comma_count > 1:
+                # Multiple commas - all are thousands separators, remove all
+                cleaned = cleaned.replace(',', '')
+            elif dot_count == 1:
+                # Single dot - could be decimal or thousands
+                # Check position: if near end (last 3 chars), likely decimal, otherwise thousands
+                dot_pos = cleaned.find('.')
+                if dot_pos >= len(cleaned) - 3:
+                    # Near end, likely decimal separator
+                    pass  # Keep it
+                else:
+                    # Likely thousands separator, remove it
+                    cleaned = cleaned.replace('.', '')
+            elif comma_count == 1:
+                # Single comma - could be decimal or thousands
+                # Check position: if near end (last 3 chars), likely decimal, otherwise thousands
+                comma_pos = cleaned.find(',')
+                if comma_pos >= len(cleaned) - 3:
+                    # Near end, likely decimal separator, convert to dot
+                    cleaned = cleaned.replace(',', '.')
+                else:
+                    # Likely thousands separator, remove it
+                    cleaned = cleaned.replace(',', '')
+            
+            # Remove any remaining non-numeric characters except decimal point and minus
+            cleaned = re.sub(r'[^\d.\-]', '', cleaned)
+            
+            if not cleaned or cleaned == '-':
+                return 0.0
+            
+            return float(cleaned)
+        except Exception as e:
+            print(f"  [DEBUG] Error parsing numeric text '{text}': {e}")
+            return 0.0
+    
+    def _extract_identifier_value(self, soup: BeautifulSoup, identifier: str) -> dict:
+        """
+        Extract values for a single identifier from the page
+        Uses the same approach as Sindikasi scraper:
+        - Find div containing identifier text
+        - Look at next divs to find numeric values
+        - First numeric = current year, second = previous year
+        
+        Args:
+            soup: BeautifulSoup parsed page
+            identifier: Identifier text to find
+            
+        Returns:
+            dict with {'2025': value, '2024': value} or {'2025': 0.0, '2024': 0.0} if not found
+        """
+        result = {'2025': 0.0, '2024': 0.0}
+        
+        try:
+            # Helper function to extract number from text
+            def extract_number(text: str) -> float:
+                """Extract a number from Indonesian-style formatted text (handles decimals correctly)."""
+                if not text:
+                    return 0.0
+                
+                # Normalize spaces
+                text = text.replace('\xa0', ' ').replace('&nbsp;', ' ').strip()
+                
+                # Use _clean_numeric_text to properly handle Indonesian format (handles both whole numbers and decimals)
+                return self._clean_numeric_text(text)
+            
+            # Helper function to split concatenated numbers (current year + previous year)
+            def split_concatenated_numbers(text: str) -> tuple[str, str]:
+                """
+                Split concatenated numbers like "23,122,1223,112,122" into two numbers.
+                Format: After comma, max 3 digits. If next is comma, same year. If next is digit, next year starts.
+                """
+                if not text or ',' not in text:
+                    return text, ""
+                
+                # Find the split point: look for pattern where after comma, we have 3 digits, then a digit (not comma)
+                pattern = r',(\d{3})(\d)(?=,|\d|$)'
+                match = re.search(pattern, text)
+                
+                if match:
+                    split_pos = match.end(1)  # Position after the 3 digits (before the next digit)
+                    current_year_text = text[:split_pos].rstrip(',')
+                    previous_year_text = text[split_pos:].lstrip(',')
+                    return current_year_text, previous_year_text
+                
+                return text, ""
+            
+            # Find the <div> whose text contains our identifier
+            label_div = None
+            all_divs = soup.find_all('div')
+            
+            for div in all_divs:
+                text = div.get_text(strip=True)
+                if not text:
+                    continue
+                
+                # Skip divs that are too long (likely contain entire page content)
+                if len(text) > 5000:
+                    continue
+                
+                # Check if identifier is in text
+                if identifier.lower() in text.lower():
+                    # Prefer divs where identifier is a significant part of the text
+                    text_lower = text.lower()
+                    identifier_lower = identifier.lower()
+                    
+                    # If text is short or identifier is at the start/end, it's likely the right div
+                    if len(text) < 200 or text_lower.startswith(identifier_lower) or text_lower.endswith(identifier_lower):
+                        label_div = div
+                        print(f"  [DEBUG] Found identifier '{identifier}' in <div>: '{text[:100]}...'")
+                        break
+            
+            if not label_div:
+                print(f"  [DEBUG] Identifier '{identifier}' NOT FOUND in page")
+                return result
+            
+            # Find the index of this div and get the next divs that contain numeric values
+            try:
+                div_index = all_divs.index(label_div)
+                # Look through next divs to find numeric values (up to 10 divs ahead)
+                numeric_count = 0
+                for j in range(1, min(11, len(all_divs) - div_index)):  # Check up to 10 next divs
+                    if numeric_count >= 2:  # We need 2 values
+                        break
+                    
+                    if div_index + j < len(all_divs):
+                        next_div = all_divs[div_index + j]
+                        div_text = next_div.get_text(strip=True)
+                        
+                        if not div_text:
+                            continue
+                        
+                        # Skip very long divs (likely contain entire page content)
+                        if len(div_text) > 5000:
+                            continue
+                        
+                        # Skip if it's clearly another identifier (contains common identifier keywords)
+                        if any(keyword in div_text.lower() for keyword in ['kepada', 'pihak', 'bank', 'bpr', 'report viewer', 'configuration error', 'piutang', 'aset', 'dpk', 'laba', 'rasio']):
+                            continue
+                        
+                        # Check if it contains concatenated numbers (has comma and might have split pattern)
+                        if ',' in div_text and len(div_text) > 10:
+                            # Try to split concatenated numbers
+                            current_year_text, prev_year_text = split_concatenated_numbers(div_text)
+                            
+                            if prev_year_text:
+                                # Found concatenated numbers, extract both
+                                current_number = extract_number(current_year_text)
+                                prev_number = extract_number(prev_year_text)
+                                
+                                # Validate numbers are reasonable
+                                if (current_number >= 0 and current_number < 1e15 and current_number != float('inf') and
+                                    prev_number >= 0 and prev_number < 1e15 and prev_number != float('inf')):
+                                    
+                                    if numeric_count == 0:
+                                        result['2025'] = current_number
+                                        numeric_count += 1
+                                    
+                                    if numeric_count == 1:
+                                        result['2024'] = prev_number
+                                        numeric_count += 1
+                                    
+                                    if numeric_count >= 2:
+                                        break
+                                    continue
+                        
+                        # Check if this div looks like it contains a single formatted number
+                        if len(div_text) > 100:
+                            continue
+                        
+                        # Extract number from single number text
+                        number = extract_number(div_text)
+                        
+                        # Validate the number is reasonable
+                        if number >= 0 and number < 1e15 and number != float('inf'):
+                            if numeric_count == 0:
+                                result['2025'] = number
+                                numeric_count += 1
+                            elif numeric_count == 1:
+                                result['2024'] = number
+                                numeric_count += 1
+                        elif number == 0 and any(char.isdigit() for char in div_text) and len(div_text) < 50:
+                            # Zero value is valid if it's a short text with digits
+                            if numeric_count == 0:
+                                result['2025'] = number
+                                numeric_count += 1
+                            elif numeric_count == 1:
+                                result['2024'] = number
+                                numeric_count += 1
+            except ValueError:
+                print(f"  [DEBUG] Identifier '{identifier}' found but couldn't find its index")
+                return result
+            
+            if result['2025'] == 0.0 and result['2024'] == 0.0:
+                print(f"  [DEBUG] Identifier '{identifier}' found but no numeric values extracted from next divs")
+            elif result['2024'] == 0.0:
+                print(f"  [DEBUG] Identifier '{identifier}' found but only 1 value extracted")
+            
+        except Exception as e:
+            print(f"  [DEBUG] Error extracting identifier '{identifier}': {e}")
+            import traceback
+            print(traceback.format_exc())
+        
+        return result
+    
+    def _parse_form1_direct_url(self) -> dict:
+        """
+        Parse BPK-901-000001 data using direct URL
+        
+        Extracts:
+        - ASET: Total Aset
+        - KREDIT: Sum of (a) Kepada BPR, (b) Kepada Bank Umum, (c) Kepada non bank – pihak terkait, (d) Kepada non bank – pihak tidak terkait
+        - DPK: Sum of (a) Tabungan, (b) Deposito, (c) Simpanan dari Bank Lain
+        
+        Returns:
+            dict with structure:
+            {
+                'ASET': {'2025': value, '2024': value},
+                'KREDIT': {'2025': sum, '2024': sum, 'individual': {...}},
+                'DPK': {'2025': sum, '2024': sum, 'individual': {...}}
+            }
+        """
+        result = {
+            'ASET': {'2025': 0.0, '2024': 0.0},
+            'KREDIT': {'2025': 0.0, '2024': 0.0, 'individual': {}},
+            'DPK': {'2025': 0.0, '2024': 0.0, 'individual': {}}
+        }
+        
+        try:
+            # Wait a bit for page to load
+            time.sleep(3.0)
+            
+            # Get page source (check iframes first)
+            page_source, report_iframe = self._get_page_source_with_iframe()
+            soup = BeautifulSoup(page_source, 'html.parser')
+            
+            # Extract ASET
+            aset_values = self._extract_identifier_value(soup, "Total Aset")
+            result['ASET'] = aset_values
+            print(f"    ASET (Total Aset): 2025={aset_values['2025']:,.2f}, 2024={aset_values['2024']:,.2f}")
+            
+            # Extract KREDIT components
+            kredit_identifiers = [
+                "Kepada BPR",
+                "Kepada Bank Umum",
+                "Kepada non bank – pihak terkait",
+                "Kepada non bank – pihak tidak terkait"
+            ]
+            
+            for identifier in kredit_identifiers:
+                values = self._extract_identifier_value(soup, identifier)
+                result['KREDIT']['individual'][identifier] = values
+                result['KREDIT']['2025'] += values['2025']
+                result['KREDIT']['2024'] += values['2024']
+                print(f"    {identifier}: 2025={values['2025']:,.2f}, 2024={values['2024']:,.2f}")
+            
+            print(f"    KREDIT Total: 2025={result['KREDIT']['2025']:,.2f}, 2024={result['KREDIT']['2024']:,.2f}")
+            
+            # Extract DPK components
+            dpk_identifiers = [
+                "Tabungan",
+                "Deposito",
+                "Simpanan dari Bank Lain"
+            ]
+            
+            for identifier in dpk_identifiers:
+                values = self._extract_identifier_value(soup, identifier)
+                result['DPK']['individual'][identifier] = values
+                result['DPK']['2025'] += values['2025']
+                result['DPK']['2024'] += values['2024']
+                print(f"    {identifier}: 2025={values['2025']:,.2f}, 2024={values['2024']:,.2f}")
+            
+            print(f"    DPK Total: 2025={result['DPK']['2025']:,.2f}, 2024={result['DPK']['2024']:,.2f}")
+            
+            return result
+            
+        except Exception as e:
+            print(f"  [ERROR] Error parsing form 1: {e}")
+            import traceback
+            print(traceback.format_exc())
+            return result
+    
+    def _parse_form2_direct_url(self) -> dict:
+        """
+        Parse BPK-901-000002 data using direct URL
+        
+        Extracts:
+        - LABA KOTOR: LABA (RUGI) TAHUN BERJALAN SEBELUM PAJAK PENGHASILAN
+        - LABA BERSIH: JUMLAH LABA (RUGI) TAHUN BERJALAN
+        
+        Returns:
+            dict with structure:
+            {
+                'LABA KOTOR': {'2025': value, '2024': value},
+                'LABA BERSIH': {'2025': value, '2024': value}
+            }
+        """
+        result = {
+            'LABA KOTOR': {'2025': 0.0, '2024': 0.0},
+            'LABA BERSIH': {'2025': 0.0, '2024': 0.0}
+        }
+        
+        try:
+            # Wait a bit for page to load
+            time.sleep(3.0)
+            
+            # Get page source (check iframes first)
+            page_source, report_iframe = self._get_page_source_with_iframe()
+            soup = BeautifulSoup(page_source, 'html.parser')
+            
+            # Extract LABA KOTOR
+            laba_kotor_values = self._extract_identifier_value(soup, "LABA (RUGI) TAHUN BERJALAN SEBELUM PAJAK PENGHASILAN")
+            result['LABA KOTOR'] = laba_kotor_values
+            print(f"    LABA KOTOR: 2025={laba_kotor_values['2025']:,.2f}, 2024={laba_kotor_values['2024']:,.2f}")
+            
+            # Extract LABA BERSIH
+            laba_bersih_values = self._extract_identifier_value(soup, "JUMLAH LABA (RUGI) TAHUN BERJALAN")
+            result['LABA BERSIH'] = laba_bersih_values
+            print(f"    LABA BERSIH: 2025={laba_bersih_values['2025']:,.2f}, 2024={laba_bersih_values['2024']:,.2f}")
+            
+            return result
+            
+        except Exception as e:
+            print(f"  [ERROR] Error parsing form 2: {e}")
+            import traceback
+            print(traceback.format_exc())
+            return result
+    
+    def _parse_form3_direct_url(self) -> dict:
+        """
+        Parse BPK-901-000003 data using direct URL
+        
+        Extracts ratios (separate, not summed):
+        - KPMM: Kewajiban Penyediaan Modal Minimum (KPMM)
+        - NPL: Non Performing Loan (NPL)
+        - ROA: Return on Assets (ROA)
+        - BOPO: Biaya Operasional terhadap Pendapatan Operasional (BOPO)
+        - NIM: Net Interest Margin (NIM)
+        - LDR: Loan to Deposit Ratio (LDR)
+        - Cash Ratio: Cash Ratio
+        
+        Returns:
+            dict with structure:
+            {
+                'KPMM': {'2025': value, '2024': value},
+                'NPL': {'2025': value, '2024': value},
+                ...
+            }
+        """
+        result = {}
+        
+        ratios = [
+            ("KPMM", "Kewajiban Penyediaan Modal Minimum (KPMM)"),
+            ("NPL", "Non Performing Loan (NPL)"),
+            ("ROA", "Return on Assets (ROA)"),
+            ("BOPO", "Biaya Operasional terhadap Pendapatan Operasional (BOPO)"),
+            ("NIM", "Net Interest Margin (NIM)"),
+            ("LDR", "Loan to Deposit Ratio (LDR)"),
+            ("Cash Ratio", "Cash Ratio")
+        ]
+        
+        try:
+            # Wait a bit for page to load
+            time.sleep(3.0)
+            
+            # Get page source (check iframes first)
+            page_source, report_iframe = self._get_page_source_with_iframe()
+            soup = BeautifulSoup(page_source, 'html.parser')
+            
+            for ratio_name, identifier in ratios:
+                values = self._extract_identifier_value(soup, identifier)
+                result[ratio_name] = values
+                # Format ratios without thousands separators (they're usually percentages)
+                print(f"    {ratio_name}: 2025={values['2025']:.2f}, 2024={values['2024']:.2f}")
+            
+            return result
+            
+        except Exception as e:
+            print(f"  [ERROR] Error parsing form 3: {e}")
+            import traceback
+            print(traceback.format_exc())
+            return result
+    
+    def _read_excel_for_zero_values(self, month: str, year: str) -> list:
+        """
+        Read Excel file and find banks with 0 or 0,00 values in KPMM (first ratio table in Rasio sheet)
+        
+        Args:
+            month: Month name (e.g., "Desember")
+            year: Year (e.g., "2025")
+            
+        Returns:
+            List of dicts: [{'bank_name': str, 'city': str, 'sheets_with_zero': [sheet_names]}, ...]
+        """
+        banks_with_zero = []
+        
+        try:
+            from openpyxl import load_workbook
+            
+            # Get filename and filepath
+            filename = self._get_excel_filename(month, year)
+            publikasi_dir = self.output_dir / "publikasi"
+            filepath = publikasi_dir / filename
+            
+            if not filepath.exists():
+                print(f"  [WARNING] Excel file not found: {filepath}")
+                return banks_with_zero
+            
+            print(f"  [INFO] Reading Excel file for zero KPMM values: {filename}")
+            wb = load_workbook(filepath, data_only=True)
+            
+            month_num = self._get_month_number(month)
+            sheet_name_prefix = f"{month_num}-{year[-2:]}"
+            
+            # Only check Rasio sheet, specifically KPMM (first ratio table)
+            rasio_sheet_name = f"{sheet_name_prefix} Rasio"
+            if rasio_sheet_name not in wb.sheetnames:
+                print(f"  [WARNING] Rasio sheet not found: {rasio_sheet_name}")
+                wb.close()
+                return banks_with_zero
+            
+            ws = wb[rasio_sheet_name]
+            print(f"    Checking sheet: {rasio_sheet_name} (KPMM only)")
+            
+            # Track banks with zero KPMM values
+            bank_zero_map = {}  # {bank_key: {'bank_name': str, 'city': str, 'sheets_with_zero': set}}
+            
+            # Find KPMM table by looking for header row with "KPMM" as column header
+            # Structure: Header row has columns: No, Nama Bank, Lokasi, KPMM
+            kpmm_header_row = None
+            kpmm_data_start_row = None
+            
+            # Look for header row that contains "KPMM" as a column header
+            for row_num in range(1, min(50, ws.max_row + 1)):  # Check first 50 rows for header
+                # Check if this row has "KPMM" in any cell (likely column D/4)
+                for col_num in range(1, 5):  # Check columns A-D
+                    cell_value = ws.cell(row=row_num, column=col_num).value
+                    if cell_value and "KPMM" in str(cell_value).upper():
+                        # Also check if this looks like a header row (has "No", "Nama Bank", "Lokasi")
+                        no_cell = ws.cell(row=row_num, column=1).value
+                        nama_bank_cell = ws.cell(row=row_num, column=2).value
+                        lokasi_cell = ws.cell(row=row_num, column=3).value
+                        
+                        if (no_cell and ("No" in str(no_cell) or str(no_cell).isdigit()) and
+                            nama_bank_cell and "Nama" in str(nama_bank_cell) and "Bank" in str(nama_bank_cell)):
+                            kpmm_header_row = row_num
+                            kpmm_data_start_row = row_num + 1  # Data starts after header
+                            print(f"    Found KPMM table header at row {row_num}")
+                            break
+                
+                if kpmm_header_row:
+                    break
+            
+            if not kpmm_header_row:
+                print(f"  [WARNING] KPMM table header not found in Rasio sheet")
+                wb.close()
+                return banks_with_zero
+            
+            # Find where KPMM table ends (next header row or empty row)
+            kpmm_data_end_row = ws.max_row + 1
+            for row_num in range(kpmm_data_start_row + 1, min(kpmm_data_start_row + 200, ws.max_row + 1)):
+                # Check if this row is a header for next table (has ratio name like "PPKA", "NPL", etc.)
+                cell_value = ws.cell(row=row_num, column=4).value  # Column D
+                if cell_value:
+                    cell_str = str(cell_value).upper()
+                    # Check if it's another ratio header (not KPMM)
+                    if cell_str in ["PPKA", "NPL NETO", "NPL GROSS", "ROA", "BOPO", "NIM", "LDR", "CR", "CASH RATIO"]:
+                        kpmm_data_end_row = row_num
+                        print(f"    Found end of KPMM table at row {row_num} (next ratio: {cell_str})")
+                        break
+                # Also check if row is empty (might indicate end of table)
+                bank_name = ws.cell(row=row_num, column=2).value
+                if not bank_name:
+                    # Check a few more rows to see if table really ended
+                    empty_count = 0
+                    for check_row in range(row_num, min(row_num + 3, ws.max_row + 1)):
+                        if not ws.cell(check_row, 2).value:
+                            empty_count += 1
+                    if empty_count >= 2:
+                        kpmm_data_end_row = row_num
+                        print(f"    Found end of KPMM table at row {row_num} (empty rows)")
+                        break
+            
+            # Check KPMM data rows
+            for row_num in range(kpmm_data_start_row, kpmm_data_end_row):
+                bank_name_cell = ws.cell(row=row_num, column=2)  # Column B: Nama Bank
+                lokasi_cell = ws.cell(row=row_num, column=3)  # Column C: Lokasi
+                value_cell = ws.cell(row=row_num, column=4)  # Column D: KPMM value
+                
+                bank_name = bank_name_cell.value
+                lokasi = lokasi_cell.value if lokasi_cell.value else ""
+                value = value_cell.value
+                
+                if not bank_name:
+                    continue
+                
+                bank_name = str(bank_name).strip()
+                city = str(lokasi).strip() if lokasi else ""
+                
+                # Check if value is 0, None, or "0,00"/"0.00" format
+                is_zero = False
+                if value is None:
+                    is_zero = True
+                elif isinstance(value, (int, float)):
+                    is_zero = (value == 0 or value == 0.0)
+                elif isinstance(value, str):
+                    # Check for string formats like "0,00", "0.00", "0"
+                    value_clean = value.strip()
+                    # Remove all commas, dots, and spaces to check if it's effectively zero
+                    cleaned = value_clean.replace(',', '').replace('.', '').replace(' ', '').replace('-', '')
+                    # Check if it's empty, just zeros, or matches common zero patterns
+                    if cleaned == '' or cleaned == '0' or cleaned == '00' or cleaned == '000':
+                        is_zero = True
+                    # Also check direct string matches for common zero formats
+                    elif value_clean.lower() in ['0', '0,00', '0.00', '0,0', '0.0', '0,000', '0.000', '-', '']:
+                        is_zero = True
+                    else:
+                        # Try to parse as float to check if it's zero
+                        try:
+                            # Replace comma with dot for parsing
+                            parsed = float(value_clean.replace(',', '.'))
+                            is_zero = (parsed == 0.0)
+                        except:
+                            pass
+                
+                # If KPMM is zero, add bank to retry list
+                if is_zero:
+                    bank_key = f"{bank_name}|{city}"
+                    if bank_key not in bank_zero_map:
+                        bank_zero_map[bank_key] = {
+                            'bank_name': bank_name,
+                            'city': city,
+                            'sheets_with_zero': set()
+                        }
+                    bank_zero_map[bank_key]['sheets_with_zero'].add(rasio_sheet_name)
+                    print(f"      Found zero KPMM: {bank_name} ({city}) - value: {value}")
+            
+            # Convert to list format
+            for bank_data in bank_zero_map.values():
+                banks_with_zero.append({
+                    'bank_name': bank_data['bank_name'],
+                    'city': bank_data['city'],
+                    'sheets_with_zero': list(bank_data['sheets_with_zero'])
+                })
+            
+            print(f"  [INFO] Found {len(banks_with_zero)} banks with zero KPMM values")
+            for bank in banks_with_zero:
+                print(f"    - {bank['bank_name']} ({bank['city']})")
+            
+            wb.close()
+            return banks_with_zero
+            
+        except Exception as e:
+            print(f"  [ERROR] Error reading Excel for zero values: {e}")
+            import traceback
+            print(traceback.format_exc())
+            return banks_with_zero
+    
+    def _retry_bank_with_direct_url(self, bank_name: str, month: str, year: str) -> dict:
+        """
+        Retry single bank using direct URL method
+        
+        Args:
+            bank_name: Bank name to retry
+            month: Month name (e.g., "Desember")
+            year: Year (e.g., "2025")
+            
+        Returns:
+            dict with extracted data: {'form1': {...}, 'form2': {...}, 'form3': {...}}
+        """
+        result = {
+            'form1': None,
+            'form2': None,
+            'form3': None
+        }
+        
+        try:
+            # Get target month and year
+            month_num = self._month_name_to_number(month)
+            form_numbers = [1, 2, 3]
+            
+            print(f"  [INFO] Retrying bank: {bank_name[:80]}...")
+            
+            # Get bank code formats (original + expanded if needed)
+            bank_code_formats = self._format_bank_code_for_url(bank_name)
+            print(f"  [DEBUG] Bank code formats to try: {bank_code_formats}")
+            
+            # Try each bank code format
+            for format_idx, bank_code in enumerate(bank_code_formats, 1):
+                print(f"  [INFO] Trying bank code format {format_idx}/{len(bank_code_formats)}: {bank_code}")
+                
+                format_success = False
+                server_error_on_form1 = False
+                
+                # Process each form
+                for form_num in form_numbers:
+                    print(f"    Processing form {form_num}...")
+                    
+                    # If form 1 had server error, skip forms 2 and 3 and try next bank code format
+                    if server_error_on_form1 and form_num > 1:
+                        print(f"    Skipping form {form_num} (form 1 had server error, trying next bank code format)")
+                        break
+                    
+                    # Build URL
+                    url = self._build_report_url(bank_code, month_num, year, form_num)
+                    print(f"    URL: {url}")
+                    
+                    # Navigate to URL
+                    max_retries = 2
+                    parsed_data = None
+                    
+                    for retry_attempt in range(max_retries + 1):
+                        try:
+                            if retry_attempt > 0:
+                                print(f"    Retrying form {form_num} (attempt {retry_attempt + 1}/{max_retries + 1})...")
+                                # Refresh the page on retry
+                                self.driver.refresh()
+                                time.sleep(3.0)
+                            else:
+                                self.driver.get(url)
+                                time.sleep(2.0)  # Wait for page to load
+                            
+                            # Check for server error
+                            if self._check_for_server_error():
+                                print(f"    [WARNING] Server error for form {form_num}")
+                                if form_num == 1:
+                                    server_error_on_form1 = True
+                                break  # Break from retry loop, try next form or next format
+                            
+                            # Parse form data
+                            if form_num == 1:
+                                parsed_data = self._parse_form1_direct_url()
+                            elif form_num == 2:
+                                parsed_data = self._parse_form2_direct_url()
+                            elif form_num == 3:
+                                parsed_data = self._parse_form3_direct_url()
+                            
+                            # If we got data, break from retry loop
+                            if parsed_data:
+                                break
+                            else:
+                                print(f"    [WARNING] Form {form_num} - no data parsed")
+                                if retry_attempt < max_retries:
+                                    continue  # Retry
+                                else:
+                                    break  # No more retries
+                                
+                        except Exception as e:
+                            error_msg = str(e)
+                            # Check if it's a Chrome timeout error
+                            is_timeout_error = "timeout" in error_msg.lower() or "Timed out receiving message from renderer" in error_msg
+                            
+                            if is_timeout_error and retry_attempt < max_retries:
+                                print(f"    [WARNING] Chrome timeout error on form {form_num}, refreshing page and retrying...")
+                                try:
+                                    self.driver.refresh()
+                                    time.sleep(3.0)
+                                    continue  # Retry
+                                except:
+                                    pass
+                            
+                            print(f"    [ERROR] Error processing form {form_num}: {e}")
+                            import traceback
+                            print(traceback.format_exc())
+                            
+                            if retry_attempt < max_retries:
+                                continue  # Retry
+                            else:
+                                break  # No more retries
+                    
+                    # Store parsed data if we got it
+                    if parsed_data:
+                        if form_num == 1:
+                            result['form1'] = parsed_data
+                        elif form_num == 2:
+                            result['form2'] = parsed_data
+                        elif form_num == 3:
+                            result['form3'] = parsed_data
+                        
+                        format_success = True
+                        print(f"    [OK] Form {form_num} - data parsed successfully!")
+                    
+                    # If form 1 had server error, break from form loop to try next bank code format
+                    if server_error_on_form1:
+                        break
+                
+                # If this format worked, we can break
+                if format_success:
+                    print(f"  [OK] Bank code format {format_idx} succeeded")
+                    break  # Break from format loop
+            
+            return result
+            
+        except Exception as e:
+            print(f"  [ERROR] Error retrying bank {bank_name}: {e}")
+            import traceback
+            print(traceback.format_exc())
+            return result
+    
+    def _update_excel_with_retry_data(self, month: str, year: str, retry_results: dict):
+        """
+        Update Excel file with retry data
+        
+        Args:
+            month: Month name (e.g., "Desember")
+            year: Year (e.g., "2025")
+            retry_results: Dict mapping bank_name to retry data: {bank_name: {'city': str, 'form1': {...}, 'form2': {...}, 'form3': {...}}}
+        """
+        try:
+            from openpyxl import load_workbook
+            from openpyxl.styles import Border, Side, Alignment
+            
+            # Get filename and filepath
+            filename = self._get_excel_filename(month, year)
+            publikasi_dir = self.output_dir / "publikasi"
+            filepath = publikasi_dir / filename
+            
+            if not filepath.exists():
+                print(f"  [WARNING] Excel file not found: {filepath}")
+                return
+            
+            print(f"  [INFO] Updating Excel file with retry data: {filename}")
+            wb = load_workbook(filepath)
+            
+            month_num = self._get_month_number(month)
+            sheet_name_prefix = f"{month_num}-{year[-2:]}"
+            previous_year = str(int(year) - 1)
+            
+            # Define border style
+            thin_border = Border(
+                left=Side(style='thin'),
+                right=Side(style='thin'),
+                top=Side(style='thin'),
+                bottom=Side(style='thin')
+            )
+            
+            # Update each bank in retry_results
+            for bank_name, bank_data in retry_results.items():
+                city = bank_data.get('city', '')
+                form1 = bank_data.get('form1')
+                form2 = bank_data.get('form2')
+                form3 = bank_data.get('form3')
+                
+                print(f"  [INFO] Updating bank: {bank_name} ({city})")
+                
+                # Update ASET sheet
+                if form1 and 'ASET' in form1:
+                    sheet_name = f"{sheet_name_prefix} ASET"
+                    if sheet_name in wb.sheetnames:
+                        ws = wb[sheet_name]
+                        self._update_excel_row_for_retry(ws, bank_name, city, 'ASET', form1['ASET'], year, previous_year, thin_border)
+                
+                # Update Kredit sheet
+                if form1 and 'KREDIT' in form1:
+                    sheet_name = f"{sheet_name_prefix} Kredit"
+                    if sheet_name in wb.sheetnames:
+                        ws = wb[sheet_name]
+                        self._update_excel_row_for_retry(ws, bank_name, city, 'Kredit', form1['KREDIT'], year, previous_year, thin_border)
+                
+                # Update DPK sheet
+                if form1 and 'DPK' in form1:
+                    sheet_name = f"{sheet_name_prefix} DPK"
+                    if sheet_name in wb.sheetnames:
+                        ws = wb[sheet_name]
+                        self._update_excel_row_for_retry(ws, bank_name, city, 'DPK', form1['DPK'], year, previous_year, thin_border)
+                
+                # Update Laba Kotor sheet
+                if form2 and 'LABA KOTOR' in form2:
+                    sheet_name = f"{sheet_name_prefix} Laba Kotor"
+                    if sheet_name in wb.sheetnames:
+                        ws = wb[sheet_name]
+                        self._update_excel_row_for_retry(ws, bank_name, city, 'Laba Kotor', form2['LABA KOTOR'], year, previous_year, thin_border)
+                
+                # Update Rasio sheet
+                if form3:
+                    sheet_name = f"{sheet_name_prefix} Rasio"
+                    if sheet_name in wb.sheetnames:
+                        ws = wb[sheet_name]
+                        self._update_rasio_sheet_for_retry(ws, bank_name, form3, year, previous_year, thin_border)
+            
+            # Save updated Excel file
+            wb.save(filepath)
+            print(f"  [OK] Excel file updated: {filepath}")
+            wb.close()
+            
+        except Exception as e:
+            print(f"  [ERROR] Error updating Excel with retry data: {e}")
+            import traceback
+            print(traceback.format_exc())
+    
+    def _update_excel_row_for_retry(self, ws, bank_name: str, city: str, data_type: str, values: dict, year: str, previous_year: str, border):
+        """
+        Update a single row in Excel sheet with retry data
+        
+        Args:
+            ws: Worksheet object
+            bank_name: Bank name
+            city: City name
+            data_type: Type of data (ASET, Kredit, DPK, Laba Kotor)
+            values: Dict with {'2025': value, '2024': value}
+            year: Current year
+            previous_year: Previous year
+            border: Border style
+        """
+        try:
+            # Find the row with matching bank name and city
+            for row_num in range(3, ws.max_row + 1):
+                bank_name_cell = ws.cell(row=row_num, column=2)  # Column B: Nama Bank
+                city_cell = ws.cell(row=row_num, column=3)  # Column C: Lokasi
+                
+                if (bank_name_cell.value and str(bank_name_cell.value).strip() == str(bank_name).strip() and
+                    city_cell.value and str(city_cell.value).strip() == str(city).strip()):
+                    
+                    # Update values
+                    val_2025 = values.get('2025', 0.0) if isinstance(values, dict) else 0.0
+                    val_2024 = values.get('2024', 0.0) if isinstance(values, dict) else 0.0
+                    
+                    # Only update if we have non-zero values
+                    if val_2025 != 0.0 or val_2024 != 0.0:
+                        ws.cell(row=row_num, column=4).value = val_2025  # Current year
+                        ws.cell(row=row_num, column=5).value = val_2024  # Previous year
+                        
+                        # Recalculate Peningkatan
+                        if val_2024 and val_2024 != 0:
+                            peningkatan = ((val_2025 - val_2024) / abs(val_2024)) * 100
+                        else:
+                            peningkatan = 0 if val_2025 == 0 else 100
+                        
+                        ws.cell(row=row_num, column=6).value = peningkatan / 100  # Peningkatan
+                        
+                        print(f"    Updated {data_type}: {bank_name} - 2025={val_2025:,.2f}, 2024={val_2024:,.2f}")
+                        break
+        except Exception as e:
+            print(f"    [ERROR] Error updating row for {bank_name}: {e}")
+    
+    def _update_rasio_sheet_for_retry(self, ws, bank_name: str, form3_data: dict, year: str, previous_year: str, border):
+        """
+        Update Rasio sheet with retry data
+        
+        Args:
+            ws: Worksheet object
+            bank_name: Bank name
+            form3_data: Dict with ratio data
+            year: Current year
+            previous_year: Previous year
+            border: Border style
+        """
+        try:
+            # Find rows with matching bank name and update ratio values
+            for row_num in range(3, ws.max_row + 1):
+                bank_name_cell = ws.cell(row=row_num, column=1)  # Column A: Nama Bank
+                ratio_name_cell = ws.cell(row=row_num, column=2)  # Column B: Rasio
+                
+                if bank_name_cell.value and str(bank_name_cell.value).strip() == str(bank_name).strip():
+                    ratio_name = ratio_name_cell.value
+                    if ratio_name and ratio_name in form3_data:
+                        values = form3_data[ratio_name]
+                        if isinstance(values, dict):
+                            val_2025 = values.get('2025', 0.0)
+                            # Only update if we have non-zero value
+                            if val_2025 != 0.0:
+                                ws.cell(row=row_num, column=3).value = val_2025  # %
+                                print(f"    Updated Rasio {ratio_name}: {bank_name} - {val_2025:,.2f}")
+        except Exception as e:
+            print(f"    [ERROR] Error updating Rasio sheet for {bank_name}: {e}")
+    
+    def _retry_zero_value_banks(self, month: str, year: str):
+        """
+        Main orchestrator: Check Excel for zero values and retry those banks
+        
+        This method is called AFTER the main scraping job (phase='all') completes.
+        It reads the latest Excel file based on the quarterly logic:
+        - Jan, Feb, Mar → December (YYYY-1)
+        - Apr, May, Jun → March YYYY
+        - Jul, Aug, Sep → June YYYY
+        - Oct, Nov, Dec → September YYYY
+        
+        Args:
+            month: Month name (e.g., "Desember") - already determined by quarterly logic
+            year: Year (e.g., "2025") - already determined by quarterly logic
+        """
+        try:
+            print("")
+            print("=" * 70)
+            print("RETRY ZERO VALUE BANKS")
+            print("=" * 70)
+            print(f"  [INFO] Checking Excel file for: {month} {year}")
+            print(f"  [INFO] This uses the same quarterly logic as main scraping")
+            print("=" * 70)
+            
+            # Check if browser is still initialized
+            if self.driver is None:
+                print("  [WARNING] Browser not initialized, initializing...")
+                self.initialize()
+            
+            # Read Excel for zero values (uses the same month/year as main scraping)
+            banks_with_zero = self._read_excel_for_zero_values(month, year)
+            
+            if not banks_with_zero:
+                print("  [INFO] No banks with zero values found, skipping retry")
+                return
+            
+            print(f"  [INFO] Found {len(banks_with_zero)} banks with zero values to retry")
+            
+            # Retry each bank
+            retry_results = {}
+            for i, bank_info in enumerate(banks_with_zero, 1):
+                bank_name = bank_info['bank_name']
+                city = bank_info['city']
+                
+                print("")
+                print(f"  [{i}/{len(banks_with_zero)}] Retrying: {bank_name} ({city})")
+                
+                # Retry bank
+                retry_data = self._retry_bank_with_direct_url(bank_name, month, year)
+                
+                # Store results
+                if retry_data['form1'] or retry_data['form2'] or retry_data['form3']:
+                    retry_results[bank_name] = {
+                        'city': city,
+                        'form1': retry_data['form1'],
+                        'form2': retry_data['form2'],
+                        'form3': retry_data['form3']
+                    }
+                
+                # Small delay before next bank
+                time.sleep(1.0)
+            
+            # Update Excel with retry results
+            if retry_results:
+                print("")
+                print("  [INFO] Updating Excel with retry results...")
+                self._update_excel_with_retry_data(month, year, retry_results)
+                print(f"  [OK] Updated {len(retry_results)} banks in Excel")
+            else:
+                print("  [WARNING] No retry data to update in Excel")
+            
+            print("")
+            print("=" * 70)
+            print("RETRY COMPLETED")
+            print("=" * 70)
+            
+        except Exception as e:
+            print(f"  [ERROR] Error in retry zero value banks: {e}")
+            import traceback
+            print(traceback.format_exc())
     
     def unload_selenium(self, kill_processes: bool = True):
         """
