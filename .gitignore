@@ -11,10 +11,9 @@ env.bak/
 venv.bak/
 scraper_dev/
 
-# Output files
-output/*.xlsx
-output/*.xls
-output/*.csv
+# Input and Output directories
+input/
+output/
 
 # IDE
 .vscode/
