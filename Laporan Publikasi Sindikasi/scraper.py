@@ -558,6 +558,280 @@ class SindikasiScraper:
             self.logger.debug(f"  Error parsing numeric text '{text}': {e}")
             return 0.0
     
+    def _extract_identifier_value_from_table(self, soup: BeautifulSoup, identifier: str) -> dict:
+        """
+        Extract values for a single identifier from table structure (td/tr).
+        Similar to how publikasi scraper extracts kredit values.
+        - Find div containing identifier text
+        - Find parent <td> and <tr>
+        - Look at next <td> elements for numeric values
+        - First td = current year (2025), second td = previous year (2024)
+        
+        Args:
+            soup: BeautifulSoup parsed page
+            identifier: Identifier text to find
+            
+        Returns:
+            dict with {'2025': value, '2024': value} or {'2025': 0.0, '2024': 0.0} if not found
+        """
+        result = {'2025': 0.0, '2024': 0.0}
+        
+        try:
+            # Helper function to extract number from text
+            def extract_number(text: str) -> float:
+                """Extract an integer-like number from Indonesian-style formatted text."""
+                if not text:
+                    return 0.0
+                
+                # Normalize spaces
+                text = text.replace('\xa0', ' ').replace('&nbsp;', ' ').strip()
+                
+                # Keep digits only (we just need whole numbers)
+                digits_only = re.sub(r'\D', '', text)
+                if not digits_only:
+                    return 0.0
+                
+                value = float(digits_only)
+                return value
+            
+            # Find the <div> whose text contains our identifier
+            label_div = None
+            for div in soup.find_all('div'):
+                text = div.get_text(strip=True)
+                if not text:
+                    continue
+                
+                # Skip divs that are too long (likely contain entire page content)
+                if len(text) > 5000:
+                    continue
+                
+                # Check if identifier is in text
+                if identifier.lower() in text.lower():
+                    # Prefer divs where identifier is a significant part of the text
+                    text_lower = text.lower()
+                    identifier_lower = identifier.lower()
+                    
+                    # If text is short or identifier is at the start/end, it's likely the right div
+                    if len(text) < 200 or text_lower.startswith(identifier_lower) or text_lower.endswith(identifier_lower):
+                        label_div = div
+                        self.logger.debug(f"    Found identifier '{identifier}' in <div>: '{text[:100]}...'")
+                        break
+            
+            if not label_div:
+                self.logger.debug(f"    Identifier '{identifier}' NOT FOUND in page")
+                return result
+            
+            # Find the parent <td> element
+            parent_td = label_div.find_parent('td')
+            if not parent_td:
+                self.logger.debug(f"    Identifier '{identifier}' found but not in a <td> element")
+                return result
+            
+            # Find the parent <tr> (table row) to get all <td> elements
+            parent_tr = parent_td.find_parent('tr')
+            if not parent_tr:
+                self.logger.debug(f"    Identifier '{identifier}' found but not in a <tr> element")
+                return result
+            
+            # Get all <td> elements in the row
+            tds = parent_tr.find_all('td')
+            
+            # Find the index of the identifier <td>
+            try:
+                identifier_td_index = tds.index(parent_td)
+            except:
+                self.logger.debug(f"    Identifier '{identifier}' found but couldn't find its td index")
+                return result
+            
+            self.logger.debug(f"    Found identifier '{identifier}' at td index {identifier_td_index}, checking next tds...")
+            
+            # Extract values from subsequent <td> elements (skip the identifier <td>)
+            numeric_count = 0
+            for td_idx, td in enumerate(tds[identifier_td_index + 1:identifier_td_index + 10], start=identifier_td_index + 1):  # Check up to 10 <td> elements
+                if numeric_count >= 2:  # We need 2 values
+                    break
+                
+                # Get text from the <td> (check for div first, then direct text)
+                td_div = td.find('div', recursive=False)
+                if not td_div:
+                    td_div = td.find('div')
+                
+                if td_div:
+                    td_text = td_div.get_text(strip=True)
+                else:
+                    td_text = td.get_text(strip=True)
+                
+                # Remove &nbsp; entities and check if empty
+                td_text_clean = td_text.replace('\xa0', ' ').replace('&nbsp;', ' ').strip()
+                
+                if not td_text_clean:
+                    continue
+                
+                # Skip if it's clearly another identifier
+                if any(keyword in td_text_clean.lower() for keyword in ['kepada', 'pihak', 'bank', 'bpr', 'report viewer', 'configuration error', 'piutang', 'aset', 'dpk', 'laba', 'rasio']):
+                    continue
+                
+                # Extract number from text
+                number = extract_number(td_text_clean)
+                
+                # Validate the number is reasonable
+                if number >= 0 and number < 1e15 and number != float('inf'):
+                    if numeric_count == 0:
+                        result['2025'] = number
+                        numeric_count += 1
+                        self.logger.debug(f"    td[{td_idx}]: found 2025 value = {number}")
+                    elif numeric_count == 1:
+                        result['2024'] = number
+                        numeric_count += 1
+                        self.logger.debug(f"    td[{td_idx}]: found 2024 value = {number}")
+                elif number == 0 and any(char.isdigit() for char in td_text_clean) and len(td_text_clean) < 50:
+                    # Zero value is valid if it's a short text with digits
+                    if numeric_count == 0:
+                        result['2025'] = number
+                        numeric_count += 1
+                        self.logger.debug(f"    td[{td_idx}]: found 2025 value = {number} (zero)")
+                    elif numeric_count == 1:
+                        result['2024'] = number
+                        numeric_count += 1
+                        self.logger.debug(f"    td[{td_idx}]: found 2024 value = {number} (zero)")
+            
+            if result['2025'] == 0.0 and result['2024'] == 0.0:
+                self.logger.debug(f"    Identifier '{identifier}' found but no numeric values extracted from next tds")
+            elif result['2024'] == 0.0:
+                self.logger.debug(f"    Identifier '{identifier}' found but only 1 value extracted")
+            
+        except Exception as e:
+            self.logger.debug(f"    Error extracting identifier '{identifier}' from table: {e}")
+            import traceback
+            self.logger.debug(traceback.format_exc())
+        
+        return result
+    
+    def _extract_ratio_value(self, soup: BeautifulSoup, identifier: str) -> dict:
+        """
+        Extract rasio values preserving decimal points (like publikasi targeted scraping).
+        Uses div-based extraction with _clean_numeric_text to properly handle decimals.
+        
+        Args:
+            soup: BeautifulSoup parsed page
+            identifier: Identifier text to find
+            
+        Returns:
+            dict with {'2025': value, '2024': value} or {'2025': 0.0, '2024': 0.0} if not found
+        """
+        result = {'2025': 0.0, '2024': 0.0}
+        
+        try:
+            # Helper function to extract number preserving decimal points (like publikasi)
+            def extract_decimal_number(text: str) -> float:
+                """Extract a number preserving decimal points using _clean_numeric_text."""
+                if not text:
+                    return 0.0
+                
+                # Normalize spaces
+                text = text.replace('\xa0', ' ').replace('&nbsp;', ' ').strip()
+                
+                # Check for negative (in parentheses)
+                is_negative = False
+                if text.startswith('(') and text.endswith(')'):
+                    is_negative = True
+                    text = text[1:-1].strip()
+                elif text.startswith('-'):
+                    is_negative = True
+                    text = text[1:].strip()
+                
+                # Use _clean_numeric_text to properly handle Indonesian format (handles both whole numbers and decimals)
+                number = self._clean_numeric_text(text)
+                if is_negative:
+                    number = -number
+                return number
+            
+            # Find the <div> whose text contains our identifier
+            label_div = None
+            all_divs = soup.find_all('div')
+            
+            for div in all_divs:
+                text = div.get_text(strip=True)
+                if not text:
+                    continue
+                
+                # Skip divs that are too long (likely contain entire page content)
+                if len(text) > 5000:
+                    continue
+                
+                # Check if identifier is in text
+                if identifier.lower() in text.lower():
+                    # Prefer divs where identifier is a significant part of the text
+                    text_lower = text.lower()
+                    identifier_lower = identifier.lower()
+                    
+                    # If text is short or identifier is at the start/end, it's likely the right div
+                    if len(text) < 200 or text_lower.startswith(identifier_lower) or text_lower.endswith(identifier_lower):
+                        label_div = div
+                        self.logger.debug(f"    Found identifier '{identifier}' in <div>: '{text[:100]}...'")
+                        break
+            
+            if not label_div:
+                self.logger.debug(f"    Identifier '{identifier}' NOT FOUND in page")
+                return result
+            
+            # Find the index of this div and get the next divs that contain numeric values
+            try:
+                div_index = all_divs.index(label_div)
+                # Look through next divs to find numeric values (up to 10 divs ahead)
+                numeric_count = 0
+                for j in range(1, min(11, len(all_divs) - div_index)):  # Check up to 10 next divs
+                    if numeric_count >= 2:  # We need 2 values
+                        break
+                    
+                    if div_index + j < len(all_divs):
+                        next_div = all_divs[div_index + j]
+                        div_text = next_div.get_text(strip=True)
+                        
+                        if not div_text:
+                            continue
+                        
+                        # Skip very long divs (likely contain entire page content)
+                        if len(div_text) > 5000:
+                            continue
+                        
+                        # Skip if it's clearly another identifier (contains common identifier keywords)
+                        if any(keyword in div_text.lower() for keyword in ['kepada', 'pihak', 'bank', 'bpr', 'report viewer', 'configuration error', 'piutang', 'aset', 'dpk', 'laba', 'rasio']):
+                            continue
+                        
+                        # Skip if too long (likely not a single ratio value)
+                        if len(div_text) > 100:
+                            continue
+                        
+                        # Extract number preserving decimal point
+                        number = extract_decimal_number(div_text)
+                        
+                        # Validate the number is reasonable
+                        if number != 0.0 or (number == 0.0 and any(char.isdigit() for char in div_text) and len(div_text) < 50):
+                            if numeric_count == 0:
+                                result['2025'] = number
+                                numeric_count += 1
+                                self.logger.debug(f"    Found 2025 value: {number} from '{div_text}'")
+                            elif numeric_count == 1:
+                                result['2024'] = number
+                                numeric_count += 1
+                                self.logger.debug(f"    Found 2024 value: {number} from '{div_text}'")
+            except ValueError:
+                self.logger.debug(f"    Identifier '{identifier}' found but couldn't find its index")
+                return result
+            
+            if result['2025'] == 0.0 and result['2024'] == 0.0:
+                self.logger.debug(f"    Identifier '{identifier}' found but no numeric values extracted from next divs")
+            elif result['2024'] == 0.0:
+                self.logger.debug(f"    Identifier '{identifier}' found but only 1 value extracted")
+            
+        except Exception as e:
+            self.logger.debug(f"    Error extracting ratio '{identifier}': {e}")
+            import traceback
+            self.logger.debug(traceback.format_exc())
+        
+        return result
+    
     def _extract_identifier_value(self, soup: BeautifulSoup, identifier: str) -> dict:
         """
         Extract values for a single identifier from the page
@@ -825,6 +1099,7 @@ class SindikasiScraper:
             self.logger.info(f"    PIUTANG Total: 2025={result['PIUTANG']['2025']:,.2f}, 2024={result['PIUTANG']['2024']:,.2f}")
             
             # Extract DPK components
+            # For BPRS, use table structure extraction (like kredit) to get correct 2024 values
             dpk_identifiers = [
                 "Liabilitas Segera",
                 "Tabungan Wadiah",
@@ -832,7 +1107,8 @@ class SindikasiScraper:
             ]
             
             for identifier in dpk_identifiers:
-                values = self._extract_identifier_value(soup, identifier)
+                # Use table structure extraction for BPRS DPK (like kredit extraction)
+                values = self._extract_identifier_value_from_table(soup, identifier)
                 result['DPK']['individual'][identifier] = values
                 result['DPK']['2025'] += values['2025']
                 result['DPK']['2024'] += values['2024']
@@ -936,9 +1212,10 @@ class SindikasiScraper:
             soup = BeautifulSoup(page_source, 'html.parser')
             
             for ratio_name, identifier in ratios:
-                values = self._extract_identifier_value(soup, identifier)
+                # Use ratio extraction that preserves decimal points (like publikasi targeted scraping)
+                values = self._extract_ratio_value(soup, identifier)
                 result[ratio_name] = values
-                self.logger.info(f"    {ratio_name}: 2025={values['2025']:,.2f}, 2024={values['2024']:,.2f}")
+                self.logger.info(f"    {ratio_name}: 2025={values['2025']:.2f}, 2024={values['2024']:.2f}")
             
             return result
             
@@ -1109,9 +1386,10 @@ class SindikasiScraper:
             soup = BeautifulSoup(page_source, 'html.parser')
             
             for ratio_name, identifier in ratios:
-                values = self._extract_identifier_value(soup, identifier)
+                # Use ratio extraction that preserves decimal points (like publikasi targeted scraping)
+                values = self._extract_ratio_value(soup, identifier)
                 result[ratio_name] = values
-                self.logger.info(f"    {ratio_name}: 2025={values['2025']:,.2f}, 2024={values['2024']:,.2f}")
+                self.logger.info(f"    {ratio_name}: 2025={values['2025']:.2f}, 2024={values['2024']:.2f}")
             
             return result
             
@@ -1333,18 +1611,19 @@ class SindikasiScraper:
     
     def _extract_date_from_filename(self, filename: str) -> tuple:
         """
-        Extract date from filename pattern: list_DD_MM_YYYY
+        Extract date from filename pattern: sindikasi_NAME_DD_MM_YYYY.txt
         
         Args:
-            filename: Filename (e.g., "list_28_11_2025")
+            filename: Filename (e.g., "sindikasi_TestName_28_11_2025.txt")
             
         Returns:
             Tuple of (day, month, year) as strings, or (None, None, None) if not found
         """
-        # Pattern: list_DD_MM_YYYY
-        match = re.search(r'list_(\d{2})_(\d{2})_(\d{4})', filename)
+        # Pattern: sindikasi_NAME_DD_MM_YYYY.txt
+        match = re.search(r'sindikasi_.+_(\d{2})_(\d{2})_(\d{4})\.txt$', filename)
         if match:
             return match.group(1), match.group(2), match.group(3)  # DD, MM, YYYY
+        
         return None, None, None
     
     def _create_excel_file(self, month: str, year: str, name: str = None, day: str = None, filename_month: str = None, filename_year: str = None):
@@ -1567,14 +1846,14 @@ class SindikasiScraper:
         Main orchestrator: Find all banks from list in appropriate URL
         
         Args:
-            list_file_path: Path to the list file (should be named list_DD_MM_YYYY)
+            list_file_path: Path to the list file (should be named sindikasi_NAME_DD_MM_YYYY.txt)
         """
         # Extract date from filename
         filename = list_file_path.name
         day, month_num, year_num = self._extract_date_from_filename(filename)
         
         if not all([day, month_num, year_num]):
-            self.logger.warning(f"Could not extract date from filename: {filename}. Expected format: list_DD_MM_YYYY")
+            self.logger.warning(f"Could not extract date from filename: {filename}. Expected format: sindikasi_NAME_DD_MM_YYYY.txt")
             # Fallback: use current date or default
             day, month_num, year_num = None, None, None
         
