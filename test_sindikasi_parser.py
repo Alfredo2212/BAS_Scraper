@@ -1,5 +1,6 @@
 """
-Test script for Sindikasi list file parser
+Test script for Sindikasi Scraper - Parser
+Tests parsing of Syariah form 1 data
 """
 
 import sys
@@ -13,36 +14,51 @@ sindikasi_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(sindikasi_module)
 SindikasiScraper = sindikasi_module.SindikasiScraper
 
-def test_list_parser():
-    """Test the list file parser"""
-    print("Testing Sindikasi list file parser...")
-    print("=" * 70)
+
+def main():
+    """Test the parser functionality"""
+    # Check for headless flag from command line
+    # Default to headless=True (no Chrome window) unless --visible or -v is passed
+    headless = '--visible' not in sys.argv and '-v' not in sys.argv
     
-    # Create scraper instance (no browser needed for parsing)
-    scraper = SindikasiScraper(headless=True)
-    
-    # Test with the existing list file
+    # Path to list file
     list_file = Path("input/list_28_11_2025")
     
     if not list_file.exists():
-        print(f"[ERROR] List file not found: {list_file}")
+        print(f"Error: List file not found: {list_file}")
         return
     
-    # Read and parse the file
-    result = scraper.read_list_file(list_file)
+    print("=" * 70)
+    print("Sindikasi Scraper - Parser Test")
+    print("=" * 70)
+    print(f"List file: {list_file}")
+    print(f"Headless mode: {headless}")
+    print()
     
-    # Display results
-    print("\nParsing Results:")
-    print(f"  SCRAPE: {result['scrape']}")
-    print(f"  NAME: {result['name']}")
-    print(f"  Number of banks: {len(result['banks'])}")
-    print("\nBanks found:")
-    for i, bank in enumerate(result['banks'], 1):
-        print(f"  {i}. {bank}")
+    # Initialize scraper (headless mode based on command line argument)
+    scraper = SindikasiScraper(headless=headless)
     
-    print("\n" + "=" * 70)
-    print("Parser test completed!")
+    try:
+        # Run the scraper
+        scraper.find_all_banks(list_file)
+        
+        print()
+        print("=" * 70)
+        print("Test completed!")
+        print("=" * 70)
+        
+    except KeyboardInterrupt:
+        print("\n\nTest interrupted by user")
+        scraper.cleanup()
+    except Exception as e:
+        print(f"\n\nError during test: {e}")
+        import traceback
+        traceback.print_exc()
+        scraper.cleanup()
+    finally:
+        if scraper.driver:
+            scraper.cleanup()
+
 
 if __name__ == "__main__":
-    test_list_parser()
-
+    main()
