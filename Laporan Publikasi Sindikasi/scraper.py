@@ -6,6 +6,7 @@ Finds listed BPRs from both BPR Konvensional and BPR Syariah report pages
 import time
 import logging
 import re
+import shutil
 from pathlib import Path
 from datetime import datetime
 from selenium.webdriver.remote.webdriver import WebDriver
@@ -1289,7 +1290,64 @@ class SindikasiScraper:
         else:
             return 'konvensional'
     
-    def _create_excel_file(self, month: str, year: str):
+    def _copy_excel_to_destination_paths(self, filepath: Path, file_type: str = "sindikasi"):
+        """
+        Copy Excel file to destination paths
+        
+        Args:
+            filepath: Path to the source Excel file
+            file_type: Type of file - "publikasi" or "sindikasi"
+        """
+        if not filepath.exists():
+            self.logger.warning(f"  [WARNING] Source file does not exist: {filepath}")
+            return
+        
+        # Define destination paths
+        destination_paths = []
+        if file_type == "publikasi":
+            destination_paths = [
+                Path(r"D:\APP\OSS\client\assets-no_backup\publikasi"),
+                Path(r"C:\Users\MSI\Desktop\OSS\client\assets-no_backup\publikasi")
+            ]
+        elif file_type == "sindikasi":
+            destination_paths = [
+                Path(r"D:\APP\OSS\client\assets-no_backup\sindikasi"),
+                Path(r"C:\Users\MSI\Desktop\OSS\client\assets-no_backup\sindikasi")
+            ]
+        else:
+            self.logger.warning(f"  [WARNING] Unknown file type: {file_type}")
+            return
+        
+        # Copy to each destination
+        for dest_dir in destination_paths:
+            try:
+                # Create destination directory if it doesn't exist
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                
+                # Copy file
+                dest_file = dest_dir / filepath.name
+                shutil.copy2(filepath, dest_file)
+                self.logger.info(f"  [OK] Copied {filepath.name} to {dest_dir}")
+            except Exception as e:
+                self.logger.warning(f"  [WARNING] Failed to copy to {dest_dir}: {e}")
+    
+    def _extract_date_from_filename(self, filename: str) -> tuple:
+        """
+        Extract date from filename pattern: list_DD_MM_YYYY
+        
+        Args:
+            filename: Filename (e.g., "list_28_11_2025")
+            
+        Returns:
+            Tuple of (day, month, year) as strings, or (None, None, None) if not found
+        """
+        # Pattern: list_DD_MM_YYYY
+        match = re.search(r'list_(\d{2})_(\d{2})_(\d{4})', filename)
+        if match:
+            return match.group(1), match.group(2), match.group(3)  # DD, MM, YYYY
+        return None, None, None
+    
+    def _create_excel_file(self, month: str, year: str, name: str = None, day: str = None, filename_month: str = None, filename_year: str = None):
         """
         Create Excel file with all bank data
         
@@ -1480,12 +1538,24 @@ class SindikasiScraper:
             # Save file to output/sindikasi subdirectory
             output_dir = Path(__file__).parent.parent / "output" / "sindikasi"
             output_dir.mkdir(parents=True, exist_ok=True)
-            # Format month with zero-padding: 01-09, 10, 11, 12
-            month_str = f"{month_num:02d}"
-            filename = f"Sindikasi_{month_str}_{year}.xlsx"
+            
+            # Generate filename based on whether we have name and date components
+            if name and day and filename_month and filename_year:
+                # New format: Sindikasi_NAME_DD_MM_YYYY.xlsx
+                # filename_month is MM from filename (list_DD_MM_YYYY)
+                filename = f"Sindikasi_{name}_{day}_{filename_month}_{filename_year}.xlsx"
+            else:
+                # Fallback to old format: Sindikasi_MM_YYYY.xlsx
+                # month_num here is from _month_name_to_number() (converted from month name)
+                month_str = f"{month_num:02d}"
+                filename = f"Sindikasi_{month_str}_{year}.xlsx"
+            
             filepath = output_dir / filename
             wb.save(filepath)
             self.logger.info(f"  [OK] Excel file created: {filepath}")
+            
+            # Copy to destination paths
+            self._copy_excel_to_destination_paths(filepath, "sindikasi")
             
         except Exception as e:
             self.logger.error(f"  [ERROR] Error creating Excel file: {e}")
@@ -1497,8 +1567,17 @@ class SindikasiScraper:
         Main orchestrator: Find all banks from list in appropriate URL
         
         Args:
-            list_file_path: Path to the list file
+            list_file_path: Path to the list file (should be named list_DD_MM_YYYY)
         """
+        # Extract date from filename
+        filename = list_file_path.name
+        day, month_num, year_num = self._extract_date_from_filename(filename)
+        
+        if not all([day, month_num, year_num]):
+            self.logger.warning(f"Could not extract date from filename: {filename}. Expected format: list_DD_MM_YYYY")
+            # Fallback: use current date or default
+            day, month_num, year_num = None, None, None
+        
         # Read list file
         list_data = self.read_list_file(list_file_path)
         
@@ -1590,7 +1669,15 @@ class SindikasiScraper:
                 self.logger.info("=" * 70)
                 self.logger.info("Exporting data to Excel...")
                 self.logger.info("=" * 70)
-                self._create_excel_file(target_month, target_year)
+                # Pass NAME and date components if available
+                self._create_excel_file(
+                    target_month, 
+                    target_year, 
+                    name=list_data.get('name'),
+                    day=day,
+                    filename_month=month_num,
+                    filename_year=year_num
+                )
             
         except Exception as e:
             self.logger.error(f"Error during bank search: {e}")
