@@ -91,10 +91,27 @@ class SindikasiScraper:
         """Cleanup resources"""
         if self.driver:
             try:
-                self.driver.quit()
-                self.logger.info("Browser closed")
+                # Suppress urllib3 warnings during cleanup
+                import warnings
+                try:
+                    import urllib3
+                    urllib3.disable_warnings()
+                except ImportError:
+                    pass
+                
+                # Suppress warnings during cleanup
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    # Small delay to let connections close naturally
+                    time.sleep(0.5)
+                    self.driver.quit()
+                    self.logger.info("Browser closed")
             except Exception as e:
-                self.logger.error(f"Error closing browser: {e}")
+                # Ignore connection errors during cleanup (browser is already closing)
+                error_str = str(e).lower()
+                if "connection" not in error_str and "refused" not in error_str and "session" not in error_str:
+                    self.logger.error(f"Error closing browser: {e}")
+                # Connection errors are expected during cleanup, so we silently ignore them
         
         if kill_processes:
             try:
@@ -1544,11 +1561,115 @@ class SindikasiScraper:
                 self.logger.info(f"  [OK] Bank code format {format_idx} succeeded")
                 break  # Break from format loop
         
-        # Add bank data to collection
-        self.all_bank_data.append(bank_data)
+        # Update existing bank data if it already exists, otherwise add new
+        # Find if this bank already exists in all_bank_data
+        existing_index = None
+        for idx, existing_data in enumerate(self.all_bank_data):
+            if existing_data.get('bank_name') == bank_name:
+                existing_index = idx
+                break
+        
+        if existing_index is not None:
+            # Update existing bank data (for retry)
+            self.all_bank_data[existing_index] = bank_data
+            self.logger.info(f"  [INFO] Updated bank data for {bank_name}")
+        else:
+            # Add new bank data
+            self.all_bank_data.append(bank_data)
         
         # Small delay before next bank
         time.sleep(1.0)
+    
+    def _retry_zero_value_banks_in_array(self):
+        """
+        Check all_bank_data array for zero values and retry those banks
+        This is called before exporting to Excel to ensure we have complete data
+        """
+        try:
+            banks_with_zero = []
+            
+            # Check each bank's data for zero values
+            for bank_data in self.all_bank_data:
+                bank_name = bank_data.get('bank_name', 'N/A')
+                bank_type = bank_data.get('bank_type', 'konvensional')
+                form1 = bank_data.get('form1') or {}
+                form2 = bank_data.get('form2') or {}
+                
+                has_zero = False
+                
+                # Check form1 data (ASET, KREDIT/PIUTANG, DPK)
+                if form1:
+                    # Check ASET
+                    aset = form1.get('ASET', {})
+                    if isinstance(aset, dict):
+                        if (aset.get('2025', 0) == 0 or aset.get('2024', 0) == 0):
+                            has_zero = True
+                    
+                    # Check KREDIT (konvensional) or PIUTANG (syariah)
+                    if bank_type == 'konvensional':
+                        kredit = form1.get('KREDIT', {})
+                        if isinstance(kredit, dict):
+                            if (kredit.get('2025', 0) == 0 or kredit.get('2024', 0) == 0):
+                                has_zero = True
+                    else:  # syariah
+                        piutang = form1.get('PIUTANG', {})
+                        if isinstance(piutang, dict):
+                            if (piutang.get('2025', 0) == 0 or piutang.get('2024', 0) == 0):
+                                has_zero = True
+                    
+                    # Check DPK
+                    dpk = form1.get('DPK', {})
+                    if isinstance(dpk, dict):
+                        if (dpk.get('2025', 0) == 0 or dpk.get('2024', 0) == 0):
+                            has_zero = True
+                
+                # Check form2 data (LABA KOTOR, LABA BERSIH)
+                if form2:
+                    laba_kotor = form2.get('LABA KOTOR', {})
+                    if isinstance(laba_kotor, dict):
+                        if (laba_kotor.get('2025', 0) == 0 or laba_kotor.get('2024', 0) == 0):
+                            has_zero = True
+                    
+                    laba_bersih = form2.get('LABA BERSIH', {})
+                    if isinstance(laba_bersih, dict):
+                        if (laba_bersih.get('2025', 0) == 0 or laba_bersih.get('2024', 0) == 0):
+                            has_zero = True
+                
+                if has_zero:
+                    banks_with_zero.append(bank_name)
+            
+            if not banks_with_zero:
+                self.logger.info("[INFO] No banks with zero values found in stored data")
+                return
+            
+            self.logger.info(f"[INFO] Found {len(banks_with_zero)} banks with zero values to retry")
+            for bank_name in banks_with_zero:
+                self.logger.info(f"  - {bank_name}")
+            
+            # Retry each bank
+            for i, bank_name in enumerate(banks_with_zero, 1):
+                self.logger.info("")
+                self.logger.info("=" * 70)
+                self.logger.info(f"[RETRY {i}/{len(banks_with_zero)}] Retrying: {bank_name}")
+                self.logger.info("=" * 70)
+                
+                # Determine bank type
+                bank_type = self._determine_bank_type(bank_name)
+                url_type = "BPR Syariah" if bank_type == 'syariah' else "BPR Konvensional"
+                
+                # Process bank again (this will update all_bank_data)
+                self.process_bank(bank_name, url_type)
+                
+                # Small delay
+                time.sleep(1.0)
+            
+            self.logger.info("")
+            self.logger.info(f"[OK] Retry completed for {len(banks_with_zero)} banks")
+            
+        except Exception as e:
+            self.logger.error(f"[ERROR] Error retrying zero value banks: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
     
     def _determine_bank_type(self, bank_name: str) -> str:
         """
@@ -1625,6 +1746,119 @@ class SindikasiScraper:
             return match.group(1), match.group(2), match.group(3)  # DD, MM, YYYY
         
         return None, None, None
+    
+    def _calculate_peringkat(self, ratio_name: str, value: float) -> int:
+        """
+        Calculate Peringkat (Rating) for a given ratio value.
+        
+        All ratios use the % column value (the ratio value scraped).
+        BPRS and BPR use the same logic, just different naming.
+        
+        Args:
+            ratio_name: Name of the ratio (e.g., "ROA", "BOPO", "NIM", "NI", "KPMM", "Cash Ratio", "LDR", "FDR", "NPL", "NPF Neto")
+            value: The ratio value from the % column
+            
+        Returns:
+            int: Peringkat value (1-5)
+        """
+        if value is None:
+            return 5  # Default to worst rating if value is missing
+        
+        # ROA
+        if ratio_name == "ROA":
+            if value >= 2:
+                return 1
+            elif 1.5 <= value < 2:
+                return 2
+            elif 1 <= value < 1.5:
+                return 3
+            elif 0.5 <= value < 1:
+                return 4
+            else:  # value < 0.5
+                return 5
+        
+        # BOPO
+        elif ratio_name == "BOPO":
+            if value <= 85:
+                return 1
+            elif 85 < value <= 90:
+                return 2
+            elif 90 < value <= 95:
+                return 3
+            elif 95 < value <= 100:
+                return 4
+            else:  # value > 100
+                return 5
+        
+        # NIM / NI (same logic, different naming)
+        elif ratio_name in ["NIM", "NI"]:
+            if value >= 10:
+                return 1
+            elif 8 <= value < 10:
+                return 2
+            elif 6 <= value < 8:
+                return 3
+            elif 4 <= value < 6:
+                return 4
+            else:  # value < 4
+                return 5
+        
+        # KPMM
+        elif ratio_name == "KPMM":
+            if value >= 15:
+                return 1
+            elif 13 <= value < 15:
+                return 2
+            elif 12 <= value < 13:
+                return 3
+            elif 8 <= value < 12:
+                return 4
+            else:  # value < 8
+                return 5
+        
+        # CR (Cash Ratio)
+        elif ratio_name == "Cash Ratio":
+            if value >= 20:
+                return 1
+            elif 15 <= value < 20:
+                return 2
+            elif 10 <= value < 15:
+                return 3
+            elif 5 <= value < 10:
+                return 4
+            else:  # value < 5
+                return 5
+        
+        # LDR / FDR (same logic, different naming)
+        elif ratio_name in ["LDR", "FDR"]:
+            if value <= 90:
+                return 1
+            elif 90 < value <= 92.5:
+                return 2
+            elif 92.5 < value <= 95:
+                return 3
+            elif 95 < value <= 97.5:
+                return 4
+            else:  # value > 97.5
+                return 5
+        
+        # NPL / NPF Neto (same logic, different naming)
+        elif ratio_name in ["NPL", "NPF Neto"]:
+            if value <= 5:
+                return 1
+            elif 5 < value <= 8:
+                return 2
+            elif 8 < value <= 11:
+                return 3
+            elif 11 < value <= 14:
+                return 4
+            else:  # value > 14
+                return 5
+        
+        # Default: return worst rating for unknown ratios
+        else:
+            self.logger.warning(f"  [WARNING] Unknown ratio name for peringkat calculation: {ratio_name}, defaulting to 5")
+            return 5
     
     def _create_excel_file(self, month: str, year: str, name: str = None, day: str = None, filename_month: str = None, filename_year: str = None):
         """
@@ -1788,15 +2022,21 @@ class SindikasiScraper:
                         else:
                             val_2025 = 0.0
                         
+                        # Calculate peringkat based on ratio value
+                        peringkat = self._calculate_peringkat(ratio_name, val_2025)
+                        
                         ws.cell(row=row, column=1, value=bank_name).border = border
                         ws.cell(row=row, column=2, value=ratio_name).border = border
                         
-                        # Format ratio value to prevent scientific notation
+                        # Format ratio value with 2 decimal places
                         cell_ratio = ws.cell(row=row, column=3, value=val_2025)
                         cell_ratio.border = border
-                        cell_ratio.number_format = number_format
+                        cell_ratio.number_format = '0.00'  # Number format with 2 decimal places
                         
-                        ws.cell(row=row, column=4, value=1).border = border  # PERINGKAT placeholder
+                        # Set peringkat value
+                        cell_peringkat = ws.cell(row=row, column=4, value=peringkat)
+                        cell_peringkat.border = border
+                        cell_peringkat.alignment = center_align
                         row += 1
                 
                 # Empty row between banks
@@ -1830,6 +2070,11 @@ class SindikasiScraper:
                 filename = f"Sindikasi_{month_str}_{year}.xlsx"
             
             filepath = output_dir / filename
+            
+            # Check if file already exists and will be replaced
+            if filepath.exists():
+                self.logger.info(f"  [INFO] File already exists, replacing: {filepath.name}")
+            
             wb.save(filepath)
             self.logger.info(f"  [OK] Excel file created: {filepath}")
             
@@ -1848,6 +2093,9 @@ class SindikasiScraper:
         Args:
             list_file_path: Path to the list file (should be named sindikasi_NAME_DD_MM_YYYY.txt)
         """
+        # Clear previous data to ensure fresh start for each file
+        self.all_bank_data = []
+        
         # Extract date from filename
         filename = list_file_path.name
         day, month_num, year_num = self._extract_date_from_filename(filename)
@@ -1941,6 +2189,14 @@ class SindikasiScraper:
                     self.logger.warning(f"  - {bank}")
             
             self.logger.info("=" * 70)
+            
+            # Check for zero values in stored array and retry before exporting to Excel
+            if self.all_bank_data:
+                self.logger.info("")
+                self.logger.info("=" * 70)
+                self.logger.info("Checking for zero values in stored data...")
+                self.logger.info("=" * 70)
+                self._retry_zero_value_banks_in_array()
             
             # Export to Excel
             if self.all_bank_data:
