@@ -21,12 +21,25 @@ def main():
     # Default to headless=True (no Chrome window) unless --visible or -v is passed
     headless = '--visible' not in sys.argv and '-v' not in sys.argv
     
-    # Path to list file
-    list_file = Path("input/list_28_11_2025")
+    # Path to list file in queue folder
+    queue_dir = Path(r"C:\Users\MSI\Desktop\OSS\client\assets-no_backup\sindikasi\queue")
     
-    if not list_file.exists():
-        print(f"Error: List file not found: {list_file}")
+    # Find list files matching pattern list_DD_MM_YYYY
+    import re
+    list_files = []
+    if queue_dir.exists():
+        for file in queue_dir.glob("list_*"):
+            if re.match(r'list_\d{2}_\d{2}_\d{4}$', file.stem):
+                list_files.append(file)
+    
+    if not list_files:
+        print(f"Error: No list files found in queue folder: {queue_dir}")
+        print("Expected format: list_DD_MM_YYYY (e.g., list_28_11_2025)")
         return
+    
+    # Use the most recent list file (or first one if multiple)
+    list_file = sorted(list_files, key=lambda p: p.stat().st_mtime, reverse=True)[0]
+    print(f"Found {len(list_files)} list file(s), using: {list_file.name}")
     
     print("=" * 70)
     print("Sindikasi Scraper - Parser Test")
