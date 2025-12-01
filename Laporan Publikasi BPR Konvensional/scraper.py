@@ -7,6 +7,7 @@ No DOM clicking, pure ExtJS ComponentQuery
 import time
 import csv
 import re
+import shutil
 from pathlib import Path
 from selenium.webdriver.remote.webdriver import WebDriver
 from selenium.webdriver.support.ui import WebDriverWait
@@ -951,6 +952,22 @@ class OJKExtJSScraper:
         
         print("\n" + "="*60)
         print("[ORCHESTRATOR] All phases completed successfully!")
+        print("="*60)
+        
+        # Phase 004: Retry zero value banks (targeted scrape)
+        print("\n" + "="*60)
+        print("[ORCHESTRATOR] Phase 004: Starting retry for zero value banks...")
+        print("="*60)
+        try:
+            self._retry_zero_value_banks(month, year)
+            print("\n[ORCHESTRATOR] Phase 004: Completed")
+        except Exception as e:
+            print(f"\n[ORCHESTRATOR] Phase 004: Error occurred: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        print("\n" + "="*60)
+        print("[ORCHESTRATOR] All phases including retry completed!")
         print("="*60)
     
     def _select_initial_dropdowns_and_checkboxes(self):
@@ -2150,6 +2167,9 @@ class OJKExtJSScraper:
             print(f"  [OK] Excel file saved to {filepath}")
             print(f"  [OK] Total records processed: {len(data_to_use)}")
             print(f"  [OK] Updated/Created 3 sheets: {sheet_name_prefix} ASET, {sheet_name_prefix} Kredit, {sheet_name_prefix} DPK")
+            
+            # Copy to destination paths
+            self._copy_excel_to_destination_paths(filepath, "publikasi")
         except Exception as e:
             print(f"  [ERROR] Error creating Excel file: {e}")
             import traceback
@@ -2577,6 +2597,9 @@ class OJKExtJSScraper:
             print(f"  [OK] Total Rasio records: {len(data_to_use)}")
             print(f"  [OK] Created 9 tables for ratios: KPMM, PPKA, NPL Neto, NPL Gross, ROA, BOPO, NIM, LDR, CR")
             print(f"  [OK] Excel file saved to: {filepath}")
+            
+            # Copy to destination paths
+            self._copy_excel_to_destination_paths(filepath, "publikasi")
         except Exception as e:
             print(f"  [ERROR] Error adding Rasio sheet: {e}")
             import traceback
@@ -5094,12 +5117,16 @@ class OJKExtJSScraper:
                 
                 print(f"  [INFO] Updating bank: {bank_name} ({city})")
                 
+                # Track if we updated any base values (for rasio recalculation)
+                base_values_updated = False
+                
                 # Update ASET sheet
                 if form1 and 'ASET' in form1:
                     sheet_name = f"{sheet_name_prefix} ASET"
                     if sheet_name in wb.sheetnames:
                         ws = wb[sheet_name]
                         self._update_excel_row_for_retry(ws, bank_name, city, 'ASET', form1['ASET'], year, previous_year, thin_border)
+                        base_values_updated = True
                 
                 # Update Kredit sheet
                 if form1 and 'KREDIT' in form1:
@@ -5107,6 +5134,7 @@ class OJKExtJSScraper:
                     if sheet_name in wb.sheetnames:
                         ws = wb[sheet_name]
                         self._update_excel_row_for_retry(ws, bank_name, city, 'Kredit', form1['KREDIT'], year, previous_year, thin_border)
+                        base_values_updated = True
                 
                 # Update DPK sheet
                 if form1 and 'DPK' in form1:
@@ -5114,6 +5142,7 @@ class OJKExtJSScraper:
                     if sheet_name in wb.sheetnames:
                         ws = wb[sheet_name]
                         self._update_excel_row_for_retry(ws, bank_name, city, 'DPK', form1['DPK'], year, previous_year, thin_border)
+                        base_values_updated = True
                 
                 # Update Laba Kotor sheet
                 if form2 and 'LABA KOTOR' in form2:
@@ -5121,17 +5150,29 @@ class OJKExtJSScraper:
                     if sheet_name in wb.sheetnames:
                         ws = wb[sheet_name]
                         self._update_excel_row_for_retry(ws, bank_name, city, 'Laba Kotor', form2['LABA KOTOR'], year, previous_year, thin_border)
+                        base_values_updated = True
                 
-                # Update Rasio sheet
+                # Update Rasio sheet with scraped form3 data first
                 if form3:
                     sheet_name = f"{sheet_name_prefix} Rasio"
                     if sheet_name in wb.sheetnames:
                         ws = wb[sheet_name]
-                        self._update_rasio_sheet_for_retry(ws, bank_name, form3, year, previous_year, thin_border)
+                        self._update_rasio_sheet_for_retry(ws, bank_name, city, form3, year, previous_year, thin_border)
+                
+                # Recalculate rasio values from updated base values
+                if base_values_updated:
+                    sheet_name = f"{sheet_name_prefix} Rasio"
+                    if sheet_name in wb.sheetnames:
+                        ws = wb[sheet_name]
+                        self._recalculate_rasio_from_base_values(wb, ws, bank_name, city, sheet_name_prefix, year, previous_year)
             
             # Save updated Excel file
             wb.save(filepath)
             print(f"  [OK] Excel file updated: {filepath}")
+            
+            # Copy to destination paths
+            self._copy_excel_to_destination_paths(filepath, "publikasi")
+            
             wb.close()
             
         except Exception as e:
@@ -5184,36 +5225,253 @@ class OJKExtJSScraper:
         except Exception as e:
             print(f"    [ERROR] Error updating row for {bank_name}: {e}")
     
-    def _update_rasio_sheet_for_retry(self, ws, bank_name: str, form3_data: dict, year: str, previous_year: str, border):
+    def _read_base_value_from_sheet(self, wb, sheet_name: str, bank_name: str, city: str) -> dict:
+        """
+        Read base value (ASET, Kredit, DPK, Laba Kotor) from a sheet for a specific bank
+        
+        Args:
+            wb: Workbook object
+            sheet_name: Name of the sheet
+            bank_name: Bank name
+            city: City name
+            
+        Returns:
+            Dict with {'2025': value, '2024': value} or None if not found
+        """
+        try:
+            if sheet_name not in wb.sheetnames:
+                return None
+            
+            ws = wb[sheet_name]
+            
+            # Find the row with matching bank name and city
+            for row_num in range(3, ws.max_row + 1):
+                bank_name_cell = ws.cell(row=row_num, column=2)  # Column B: Nama Bank
+                city_cell = ws.cell(row=row_num, column=3)  # Column C: Lokasi
+                
+                if (bank_name_cell.value and str(bank_name_cell.value).strip() == str(bank_name).strip() and
+                    city_cell.value and str(city_cell.value).strip() == str(city).strip()):
+                    
+                    # Read values from columns 4 (2025) and 5 (2024)
+                    val_2025 = ws.cell(row=row_num, column=4).value
+                    val_2024 = ws.cell(row=row_num, column=5).value
+                    
+                    # Convert to float, default to 0.0 if None
+                    val_2025 = float(val_2025) if val_2025 is not None else 0.0
+                    val_2024 = float(val_2024) if val_2024 is not None else 0.0
+                    
+                    return {'2025': val_2025, '2024': val_2024}
+            
+            return None
+        except Exception as e:
+            print(f"    [ERROR] Error reading base value from {sheet_name} for {bank_name}: {e}")
+            return None
+    
+    def _recalculate_rasio_from_base_values(self, wb, rasio_ws, bank_name: str, city: str, sheet_name_prefix: str, year: str, previous_year: str):
+        """
+        Recalculate rasio values from updated base values (ASET, Kredit, DPK, Laba Kotor)
+        
+        The rasio sheet has multiple tables, one for each ratio type. Each table has:
+        - Column A: No
+        - Column B: Nama Bank
+        - Column C: Lokasi
+        - Column D: Ratio value
+        
+        Args:
+            wb: Workbook object
+            rasio_ws: Rasio worksheet object
+            bank_name: Bank name
+            city: City name
+            sheet_name_prefix: Sheet name prefix (e.g., "09-25")
+            year: Current year
+            previous_year: Previous year
+        """
+        try:
+            # Read base values from their respective sheets
+            aset_sheet = f"{sheet_name_prefix} ASET"
+            kredit_sheet = f"{sheet_name_prefix} Kredit"
+            dpk_sheet = f"{sheet_name_prefix} DPK"
+            laba_kotor_sheet = f"{sheet_name_prefix} Laba Kotor"
+            
+            aset_values = self._read_base_value_from_sheet(wb, aset_sheet, bank_name, city)
+            kredit_values = self._read_base_value_from_sheet(wb, kredit_sheet, bank_name, city)
+            dpk_values = self._read_base_value_from_sheet(wb, dpk_sheet, bank_name, city)
+            laba_kotor_values = self._read_base_value_from_sheet(wb, laba_kotor_sheet, bank_name, city)
+            
+            if not any([aset_values, kredit_values, dpk_values, laba_kotor_values]):
+                print(f"    [WARNING] No base values found for {bank_name} to recalculate rasio")
+                return
+            
+            # Calculate rasio values that can be calculated from base values
+            calculated_ratios = {}
+            
+            # ROA = (Laba Kotor / ASET) * 100
+            if laba_kotor_values and aset_values:
+                if aset_values['2025'] != 0:
+                    roa_2025 = (laba_kotor_values['2025'] / aset_values['2025']) * 100
+                    calculated_ratios['ROA'] = {'2025': roa_2025}
+                if aset_values['2024'] != 0:
+                    roa_2024 = (laba_kotor_values['2024'] / aset_values['2024']) * 100
+                    if 'ROA' not in calculated_ratios:
+                        calculated_ratios['ROA'] = {}
+                    calculated_ratios['ROA']['2024'] = roa_2024
+            
+            # LDR = (Kredit / DPK) * 100
+            if kredit_values and dpk_values:
+                if dpk_values['2025'] != 0:
+                    ldr_2025 = (kredit_values['2025'] / dpk_values['2025']) * 100
+                    calculated_ratios['LDR'] = {'2025': ldr_2025}
+                if dpk_values['2024'] != 0:
+                    ldr_2024 = (kredit_values['2024'] / dpk_values['2024']) * 100
+                    if 'LDR' not in calculated_ratios:
+                        calculated_ratios['LDR'] = {}
+                    calculated_ratios['LDR']['2024'] = ldr_2024
+            
+            # Update rasio sheet with calculated values
+            if calculated_ratios:
+                print(f"    [INFO] Recalculating rasio values from base values for {bank_name}")
+                
+                # The rasio sheet has multiple tables (one per ratio type)
+                # Each table starts with a header row, then data rows
+                # We need to find the table for each ratio, then find the bank within that table
+                
+                for ratio_name, ratio_data in calculated_ratios.items():
+                    val_2025 = ratio_data.get('2025', 0.0)
+                    
+                    if val_2025 == 0.0:
+                        continue
+                    
+                    # Find the table for this ratio by looking for the header row
+                    # Header row has: ['No', 'Nama Bank', 'Lokasi', ratio_name]
+                    found_table = False
+                    
+                    for row_num in range(1, rasio_ws.max_row + 1):
+                        # Check if this is a header row for the ratio we're looking for
+                        header_col_d = rasio_ws.cell(row=row_num, column=4).value
+                        if header_col_d and str(header_col_d).strip() == str(ratio_name).strip():
+                            # Found the header row for this ratio table
+                            # Data rows start from row_num + 1
+                            data_start_row = row_num + 1
+                            found_table = True
+                            
+                            # Search for the bank in this table
+                            for data_row in range(data_start_row, rasio_ws.max_row + 1):
+                                # Check if we've reached the next table (empty row or new header)
+                                bank_name_cell = rasio_ws.cell(row=data_row, column=2)  # Column B: Nama Bank
+                                city_cell = rasio_ws.cell(row=data_row, column=3)  # Column C: Lokasi
+                                
+                                # If we hit an empty bank name, we've passed this table
+                                if not bank_name_cell.value:
+                                    break
+                                
+                                # Check if this is our bank
+                                if (str(bank_name_cell.value).strip() == str(bank_name).strip() and
+                                    city_cell.value and str(city_cell.value).strip() == str(city).strip()):
+                                    # Found the bank, update the ratio value (column D)
+                                    rasio_ws.cell(row=data_row, column=4).value = val_2025
+                                    print(f"    Recalculated Rasio {ratio_name}: {bank_name} - {val_2025:,.2f}")
+                                    break
+                            
+                            break
+                    
+                    if not found_table:
+                        print(f"    [WARNING] Could not find table for ratio {ratio_name} in rasio sheet")
+                
+        except Exception as e:
+            print(f"    [ERROR] Error recalculating rasio from base values for {bank_name}: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _update_rasio_sheet_for_retry(self, ws, bank_name: str, city: str, form3_data: dict, year: str, previous_year: str, border):
         """
         Update Rasio sheet with retry data
+        
+        The rasio sheet has multiple tables, one for each ratio type. Each table has:
+        - Column A: No
+        - Column B: Nama Bank
+        - Column C: Lokasi
+        - Column D: Ratio value
         
         Args:
             ws: Worksheet object
             bank_name: Bank name
-            form3_data: Dict with ratio data
+            city: City name
+            form3_data: Dict with ratio data (e.g., {'ROA': {'2025': value}, 'LDR': {'2025': value}, ...})
             year: Current year
             previous_year: Previous year
             border: Border style
         """
         try:
-            # Find rows with matching bank name and update ratio values
-            for row_num in range(3, ws.max_row + 1):
-                bank_name_cell = ws.cell(row=row_num, column=1)  # Column A: Nama Bank
-                ratio_name_cell = ws.cell(row=row_num, column=2)  # Column B: Rasio
+            if not form3_data:
+                return
+            
+            # Map form3 keys to rasio sheet ratio names
+            # form3_data might have keys like 'ROA', 'LDR', 'KPMM', etc.
+            ratio_name_mapping = {
+                'ROA': 'ROA',
+                'LDR': 'LDR',
+                'KPMM': 'KPMM',
+                'PPKA': 'PPKA',
+                'NPL Neto': 'NPL Neto',
+                'NPL Gross': 'NPL Gross',
+                'BOPO': 'BOPO',
+                'NIM': 'NIM',
+                'CR': 'CR',
+                'Cash Ratio': 'CR'
+            }
+            
+            # For each ratio in form3_data, find its table and update the bank's value
+            for form3_key, ratio_values in form3_data.items():
+                if not isinstance(ratio_values, dict):
+                    continue
                 
-                if bank_name_cell.value and str(bank_name_cell.value).strip() == str(bank_name).strip():
-                    ratio_name = ratio_name_cell.value
-                    if ratio_name and ratio_name in form3_data:
-                        values = form3_data[ratio_name]
-                        if isinstance(values, dict):
-                            val_2025 = values.get('2025', 0.0)
-                            # Only update if we have non-zero value
-                            if val_2025 != 0.0:
-                                ws.cell(row=row_num, column=3).value = val_2025  # %
+                # Get the ratio name as it appears in the Excel sheet
+                ratio_name = ratio_name_mapping.get(form3_key, form3_key)
+                val_2025 = ratio_values.get('2025', 0.0)
+                
+                if val_2025 == 0.0:
+                    continue
+                
+                # Find the table for this ratio by looking for the header row
+                # Header row has: ['No', 'Nama Bank', 'Lokasi', ratio_name]
+                found_table = False
+                
+                for row_num in range(1, ws.max_row + 1):
+                    # Check if this is a header row for the ratio we're looking for
+                    header_col_d = ws.cell(row=row_num, column=4).value
+                    if header_col_d and str(header_col_d).strip() == str(ratio_name).strip():
+                        # Found the header row for this ratio table
+                        # Data rows start from row_num + 1
+                        data_start_row = row_num + 1
+                        found_table = True
+                        
+                        # Search for the bank in this table (we need city to match, but if not available, match by bank name only)
+                        for data_row in range(data_start_row, ws.max_row + 1):
+                            # Check if we've reached the next table (empty row or new header)
+                            bank_name_cell = ws.cell(row=data_row, column=2)  # Column B: Nama Bank
+                            city_cell = ws.cell(row=data_row, column=3)  # Column C: Lokasi
+                            
+                            # If we hit an empty bank name, we've passed this table
+                            if not bank_name_cell.value:
+                                break
+                            
+                            # Check if this is our bank (match by bank name and city)
+                            if (str(bank_name_cell.value).strip() == str(bank_name).strip() and
+                                city_cell.value and str(city_cell.value).strip() == str(city).strip()):
+                                # Found the bank, update the ratio value (column D)
+                                ws.cell(row=data_row, column=4).value = val_2025
                                 print(f"    Updated Rasio {ratio_name}: {bank_name} - {val_2025:,.2f}")
+                                break
+                        
+                        break
+                
+                if not found_table:
+                    print(f"    [WARNING] Could not find table for ratio {ratio_name} in rasio sheet")
+                    
         except Exception as e:
             print(f"    [ERROR] Error updating Rasio sheet for {bank_name}: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _retry_zero_value_banks(self, month: str, year: str):
         """
