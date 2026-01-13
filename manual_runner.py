@@ -42,8 +42,9 @@ logger = logging.getLogger(__name__)
 
 def main():
     """Main function for manual runs"""
-    # Target output directory (same as scheduler)
-    target_output_dir = Path(r"D:\APP\OSS\client\assets\publikasi")
+    # Target output directory from environment variable
+    from config.settings import Settings
+    target_output_dir = Settings.OUTPUT_PUBLIKASI
     
     # Use shared execution function - ensures identical behavior with scheduler
     success = run_scraper_execution(

@@ -17,6 +17,9 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 import pytz
 
+# Import settings for environment variables
+from config.settings import Settings
+
 # Add the parent directory to path to import the module
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -85,7 +88,7 @@ def run_scraper_job():
         publikasi_running = True
     
     try:
-        target_output_dir = Path(r"D:\APP\OSS\client\assets\publikasi")
+        target_output_dir = Settings.OUTPUT_PUBLIKASI
         
         # Use shared execution function - ensures identical behavior with manual runner
         run_scraper_execution(
@@ -115,7 +118,7 @@ def check_sindikasi_queue():
         sindikasi_running = True
     
     try:
-        queue_dir = Path(r"C:\Users\MSI\Desktop\OSS\client\assets-no_backup\sindikasi\queue")
+        queue_dir = Settings.QUEUE_SINDIKASI
         
         if not queue_dir.exists():
             logger.debug(f"[DEBUG] Queue directory does not exist: {queue_dir}")
@@ -220,7 +223,7 @@ def run_ibprs_scraper_job():
             logger.info("=" * 70)
             logger.info("IBPRS Scraper - Scheduled Job Completed Successfully")
             logger.info(f"Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            logger.info("Files saved to: D:\\APP\\OSS\\client\\assets-no_backup\\ibprs")
+            logger.info(f"Files saved to: {Settings.OUTPUT_IBPRS}")
             logger.info("=" * 70)
         else:
             logger.error("=" * 70)

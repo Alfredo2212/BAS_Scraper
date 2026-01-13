@@ -31,8 +31,8 @@ def main():
     print("=" * 70)
     print()
     
-    # Create scraper instance (non-headless so we can see what's happening)
-    scraper = IBPRSScraper(headless=False)
+    # Create scraper instance (headless mode)
+    scraper = IBPRSScraper(headless=True)
     
     try:
         # Run the navigation test

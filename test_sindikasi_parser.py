@@ -22,8 +22,9 @@ def main():
     # Default to headless=True (no Chrome window) unless --visible or -v is passed
     headless = '--visible' not in sys.argv and '-v' not in sys.argv
     
-    # Path to list file in queue folder
-    queue_dir = Path(r"C:\Users\MSI\Desktop\OSS\client\assets-no_backup\sindikasi\queue")
+    # Path to list file in queue folder (from environment variable)
+    from config.settings import Settings
+    queue_dir = Settings.QUEUE_SINDIKASI
     
     # Find sindikasi files matching pattern sindikasi_NAME_DD_MM_YYYY.txt
     list_files = []

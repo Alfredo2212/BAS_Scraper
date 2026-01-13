@@ -38,7 +38,7 @@ except ImportError:
     from helper import ExtJSHelper
     from selenium_setup import SeleniumSetup
 
-from config.settings import OJKConfig
+from config.settings import OJKConfig, Settings
 
 
 class SindikasiScraper:
@@ -1701,18 +1701,12 @@ class SindikasiScraper:
             self.logger.warning(f"  [WARNING] Source file does not exist: {filepath}")
             return
         
-        # Define destination paths
+        # Define destination paths from environment variables
         destination_paths = []
         if file_type == "publikasi":
-            destination_paths = [
-                Path(r"D:\APP\OSS\client\assets-no_backup\publikasi"),
-                Path(r"C:\Users\MSI\Desktop\OSS\client\assets-no_backup\publikasi")
-            ]
+            destination_paths = [Settings.OUTPUT_PUBLIKASI]
         elif file_type == "sindikasi":
-            destination_paths = [
-                Path(r"D:\APP\OSS\client\assets-no_backup\sindikasi"),
-                Path(r"C:\Users\MSI\Desktop\OSS\client\assets-no_backup\sindikasi")
-            ]
+            destination_paths = [Settings.OUTPUT_SINDIKASI]
         else:
             self.logger.warning(f"  [WARNING] Unknown file type: {file_type}")
             return

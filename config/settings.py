@@ -4,6 +4,10 @@ Settings and configuration for OJK Scraper
 
 import os
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Base paths
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -84,6 +88,20 @@ class Settings:
     OUTPUT_DIR = OUTPUT_DIR
     EXCEL_FILENAME_PREFIX = "ojk_report"
     EXCEL_FILENAME_DATE_FORMAT = "%Y%m%d_%H%M%S"
+    
+    # Output directories from environment variables
+    OUTPUT_PUBLIKASI = Path(os.getenv('OUTPUT_PUBLIKASI', r'D:\APP\OSS\client\assets-no_backup\publikasi'))
+    OUTPUT_SINDIKASI = Path(os.getenv('OUTPUT_SINDIKASI', r'D:\APP\OSS\client\assets-no_backup\sindikasi'))
+    OUTPUT_IBPRS = Path(os.getenv('OUTPUT_IBPRS', r'D:\APP\OSS\client\assets-no_backup\ibprs'))
+    
+    # Queue/Input directories from environment variables
+    QUEUE_SINDIKASI = Path(os.getenv('QUEUE_SINDIKASI', r'C:\Users\MSI\Desktop\OSS\client\assets-no_backup\sindikasi\queue'))
+    
+    # Create output directories if they don't exist
+    OUTPUT_PUBLIKASI.mkdir(parents=True, exist_ok=True)
+    OUTPUT_SINDIKASI.mkdir(parents=True, exist_ok=True)
+    OUTPUT_IBPRS.mkdir(parents=True, exist_ok=True)
+    QUEUE_SINDIKASI.mkdir(parents=True, exist_ok=True)
     
     # Logging settings
     LOGS_DIR = LOGS_DIR

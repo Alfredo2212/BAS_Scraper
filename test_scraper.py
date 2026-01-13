@@ -21,8 +21,9 @@ OJKExtJSScraper = scraper_module.OJKExtJSScraper
 
 def main():
     """Test the ExtJS scraper"""
-    # Production output directory
-    production_output_dir = Path(r"D:\APP\OSS\client\assets\publikasi")
+    # Production output directory from environment variable
+    from config.settings import Settings
+    production_output_dir = Settings.OUTPUT_PUBLIKASI
     
     print("OJK ExtJS Scraper Test")
     print("=" * 60)

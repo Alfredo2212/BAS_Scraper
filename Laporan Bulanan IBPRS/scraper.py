@@ -37,7 +37,7 @@ except ImportError:
     from helper import ExtJSHelper
     from selenium_setup import SeleniumSetup
 
-from config.settings import OJKConfig
+from config.settings import OJKConfig, Settings
 
 
 class IBPRSScraper:
@@ -658,8 +658,8 @@ class IBPRSScraper:
             return None
         
         try:
-            # Save to destination directory: D:\APP\OSS\client\assets-no_backup\ibprs
-            destination_dir = Path(r"D:\APP\OSS\client\assets-no_backup\ibprs")
+            # Save to destination directory from environment variable
+            destination_dir = Settings.OUTPUT_IBPRS
             destination_dir.mkdir(parents=True, exist_ok=True)
             
             # Use fixed filename that will overwrite previous files
@@ -702,8 +702,8 @@ class IBPRSScraper:
             return None
         
         try:
-            # Save to destination directory: D:\APP\OSS\client\assets-no_backup\ibprs
-            destination_dir = Path(r"D:\APP\OSS\client\assets-no_backup\ibprs")
+            # Save to destination directory from environment variable
+            destination_dir = Settings.OUTPUT_IBPRS
             destination_dir.mkdir(parents=True, exist_ok=True)
             
             # Use fixed filename that will overwrite previous files
