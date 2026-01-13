@@ -38,10 +38,18 @@ sindikasi_scraper_module = importlib.util.module_from_spec(sindikasi_spec)
 sindikasi_spec.loader.exec_module(sindikasi_scraper_module)
 SindikasiScraper = sindikasi_scraper_module.SindikasiScraper
 
+# Import IBPRS scraper
+ibprs_module_path = Path(__file__).parent / "Laporan Bulanan IBPRS" / "scraper.py"
+ibprs_spec = importlib.util.spec_from_file_location("ibprs_scraper_module", ibprs_module_path)
+ibprs_scraper_module = importlib.util.module_from_spec(ibprs_spec)
+ibprs_spec.loader.exec_module(ibprs_scraper_module)
+IBPRSScraper = ibprs_scraper_module.IBPRSScraper
+
 ### GLOBAL STATE ###
 # Track if scrapers are running
 publikasi_running = False
 sindikasi_running = False
+ibprs_running = False
 lock = threading.Lock()
 
 ### LOGGING SETUP ###
@@ -179,6 +187,59 @@ def check_sindikasi_queue():
     finally:
         with lock:
             sindikasi_running = False
+
+def run_ibprs_scraper_job():
+    """
+    Job function that runs the IBPRS scraper
+    Called by APScheduler every Wednesday at 15:00
+    Runs in headless mode
+    """
+    global ibprs_running
+    
+    with lock:
+        if ibprs_running:
+            logger.warning("[WARNING] IBPRS scraper is already running, skipping...")
+            return
+        ibprs_running = True
+    
+    scraper = None
+    try:
+        logger.info("=" * 70)
+        logger.info("IBPRS Scraper - Scheduled Job Started")
+        logger.info(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info("=" * 70)
+        
+        # Initialize scraper in headless mode
+        logger.info("[INFO] Initializing IBPRS scraper (headless mode)...")
+        scraper = IBPRSScraper(headless=True)
+        
+        # Run the complete scrape and save workflow
+        success = scraper.scrape_and_save("Kep. Riau")
+        
+        if success:
+            logger.info("=" * 70)
+            logger.info("IBPRS Scraper - Scheduled Job Completed Successfully")
+            logger.info(f"Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            logger.info("Files saved to: D:\\APP\\OSS\\client\\assets-no_backup\\ibprs")
+            logger.info("=" * 70)
+        else:
+            logger.error("=" * 70)
+            logger.error("IBPRS Scraper - Scheduled Job Failed")
+            logger.error(f"Failed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            logger.error("=" * 70)
+            
+    except Exception as e:
+        logger.error(f"[ERROR] Error running IBPRS scraper: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+    finally:
+        if scraper:
+            try:
+                scraper.cleanup()
+            except:
+                pass
+        with lock:
+            ibprs_running = False
 
 def run_sindikasi_scraper(list_file: Path, name: str, day: str, month: str, year: str):
     """
@@ -403,6 +464,15 @@ def main():
         replace_existing=True
     )
     
+    # Schedule IBPRS scraper for Wednesday at 15:00
+    scheduler.add_job(
+        run_ibprs_scraper_job,
+        trigger=CronTrigger(day_of_week='wed', hour=15, minute=0),
+        id='ibprs_scraper_wednesday',
+        name='IBPRS Scraper - Wednesday 15:00',
+        replace_existing=True
+    )
+    
     # Get and display next run times
     try:
         next_runs = get_next_run_times(scheduler)
@@ -420,6 +490,7 @@ def main():
     logger.info("=" * 70)
     logger.info("Scheduler is running:")
     logger.info("  - Publikasi scraper: Tuesday and Thursday at 15:00")
+    logger.info("  - IBPRS scraper: Wednesday at 15:00 (headless)")
     logger.info("  - Sindikasi queue checker: Every 10 minutes")
     logger.info("Press Ctrl+C to stop.")
     logger.info("=" * 70)
